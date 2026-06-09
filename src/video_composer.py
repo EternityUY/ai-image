@@ -337,6 +337,22 @@ def _run_ffmpeg_with_oom_fallback(
                 clip_paths, audio_path, output_path,
                 filter_complex, num_clips, preset, crf, volume,
             )
+        elif e.returncode in (234,):
+            # Exit code 234 typically means max_muxing_queue_size exceeded
+            # due to xfade producing uneven frame output — retry with larger queue
+            logger.warning(
+                "ffmpeg exit code 234 (muxer queue) — retrying with larger queue size",
+            )
+            # Increase max_muxing_queue_size and retry
+            safe_cmd = list(cmd)
+            for i, arg in enumerate(safe_cmd):
+                if arg == "-max_muxing_queue_size":
+                    current_val = int(safe_cmd[i + 1])
+                    safe_cmd[i + 1] = str(current_val * 4)
+                    break
+            else:
+                safe_cmd.extend(["-max_muxing_queue_size", "4096"])
+            subprocess.run(safe_cmd, check=True, capture_output=True, text=True, timeout=timeout)
         else:
             raise
 
@@ -759,12 +775,13 @@ def compose_slideshow(
             cmd.extend([
                 "-shortest",
                 "-movflags", "+faststart",
-                "-max_muxing_queue_size", "1024",
+                "-max_muxing_queue_size", "4096",
                 output_path,
             ])
 
-            logger.info("Composing final video with %d clips and '%s' transitions ...",
-                         num_images, style)
+            logger.info("Composing final video with %d clips and '%s' transitions%s",
+                         num_images, style,
+                         " (memory: %d/%d MB)" % (est_mb, avail_mb) if avail_mb else "")
             _run_ffmpeg_with_oom_fallback(
                 cmd, clip_paths, audio_path, output_path,
                 filter_complex, num_images, preset, crf, volume,
@@ -782,7 +799,9 @@ def compose_slideshow(
         return output_path
 
     except subprocess.CalledProcessError as e:
-        error_msg = e.stderr.strip()[:500] if e.stderr else str(e)
+        error_msg = e.stderr.strip()[:2000] if e.stderr else str(e)
+        if e.stderr and len(e.stderr) > 2000:
+            logger.debug("Full ffmpeg stderr (truncated in exception):\n%s", e.stderr)
         raise RuntimeError(f"ffmpeg failed (exit code {e.returncode}): {error_msg}") from e
     except FileNotFoundError:
         raise RuntimeError(
