@@ -216,6 +216,131 @@ def _draw_title(
     return True
 
 
+def _get_available_memory_mb() -> int | None:
+    """Get available system memory in MiB, or None if unknown (non-Linux)."""
+    if _IS_WINDOWS:
+        return None
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except (FileNotFoundError, ValueError, IndexError, OSError):
+        pass
+    return None
+
+
+def _estimate_ffmpeg_memory_mb(video_duration: float, width: int, height: int) -> int:
+    """Estimate ffmpeg peak memory in MiB for a concat + xfade encode.
+
+    Model: x264 frame buffer pool for the concat phase:
+      - Each YUV420p frame = width × height × 1.5 bytes
+      - xfade needs 2 input frames decoded simultaneously
+      - encoder lookahead / ref frames for preset=medium ≈ 30 buffers
+      - Add 128 MiB safety margin for muxer / audio / filter graph
+    """
+    per_frame = (width * height * 1.5) / (1024 * 1024)
+    buffer_count = min(40, max(15, int(video_duration * 24 * 0.3)))
+    return int(per_frame * buffer_count * 2) + 128
+
+
+def _encode_two_pass_fallback(
+    clip_paths: list[str],
+    audio_path: str,
+    output_path: str,
+    filter_complex: str,
+    num_clips: int,
+    preset: str,
+    crf: int,
+    volume: float,
+) -> str:
+    """Two-pass encoding as OOM-safe fallback: silent video first, then mux audio."""
+    silent_path = output_path + ".silent.mp4"
+    try:
+        # Pass 1 — silent slideshow (no audio muxer → smaller internal queues)
+        cmd1 = [
+            "ffmpeg", "-y",
+            *[arg for i in range(num_clips) for arg in ("-i", clip_paths[i])],
+            "-filter_complex", filter_complex,
+            "-map", "[video]",
+            "-c:v", "libx264",
+            "-preset", preset,
+            "-crf", str(crf),
+            "-an",
+            "-threads", "2",
+            "-bufsize", "2M",
+            silent_path,
+        ]
+        logger.info("Two-pass — pass 1: encoding silent slideshow")
+        subprocess.run(cmd1, check=True, capture_output=True, text=True, timeout=600)
+
+        s1_size = os.path.getsize(silent_path)
+        logger.info("Two-pass — pass 1 done: %s (%d bytes)", silent_path, s1_size)
+
+        # Pass 2 — mux audio via stream copy (near-zero CPU/memory)
+        cmd2 = [
+            "ffmpeg", "-y",
+            "-i", silent_path,
+            "-i", audio_path,
+            "-c", "copy",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        if abs(volume - 1.0) > 0.01:
+            # Volume filter requires re-encode of audio
+            cmd2 = [
+                "ffmpeg", "-y",
+                "-i", silent_path,
+                "-i", audio_path,
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-af", f"volume={volume}",
+                "-movflags", "+faststart",
+                output_path,
+            ]
+        logger.info("Two-pass — pass 2: muxing audio")
+        subprocess.run(cmd2, check=True, capture_output=True, text=True, timeout=120)
+
+        logger.info("Two-pass done: %s", output_path)
+        return output_path
+
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"Two-pass ffmpeg failed: {e}") from e
+    finally:
+        if silent_path and os.path.isfile(silent_path):
+            os.unlink(silent_path)
+
+
+def _run_ffmpeg_with_oom_fallback(
+    cmd: list[str],
+    clip_paths: list[str],
+    audio_path: str,
+    output_path: str,
+    filter_complex: str,
+    num_clips: int,
+    preset: str,
+    crf: int,
+    volume: float,
+    timeout: int = 600,
+) -> None:
+    """Run ffmpeg; if killed by SIGKILL/OOM, retry with two-pass fallback."""
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout)
+    except subprocess.CalledProcessError as e:
+        if e.returncode in (-9, 137):
+            logger.warning(
+                "ffmpeg killed by signal %d (OOM) — falling back to two-pass encoding",
+                e.returncode,
+            )
+            _encode_two_pass_fallback(
+                clip_paths, audio_path, output_path,
+                filter_complex, num_clips, preset, crf, volume,
+            )
+        else:
+            raise
+
+
 def _get_audio_duration(audio_path: str) -> float:
     """Get audio duration in seconds using ffprobe."""
     result = subprocess.run(
@@ -518,7 +643,6 @@ def compose_slideshow(
 
         # Phase 1: Render each image to its own temp video clip (one at a time)
         # to avoid OOM from running multiple zoompan filters in parallel.
-        clip_paths: list[str] = []
         n_frames = int(display_duration * fps)
         for i in range(num_images):
             clip_path = os.path.join(tmp_dir, f"clip_{i:02d}.mp4")
@@ -554,7 +678,18 @@ def compose_slideshow(
                     clip_path,
                 ]
             logger.info("Rendering clip %d/%d ...", i + 1, num_images)
-            subprocess.run(clip_cmd, check=True, capture_output=True, text=True, timeout=300)
+            clip_cmd.extend(["-threads", "2", "-bufsize", "2M"])
+            try:
+                subprocess.run(clip_cmd, check=True, capture_output=True, text=True, timeout=300)
+            except subprocess.CalledProcessError as e:
+                if e.returncode in (-9, 137):
+                    logger.warning("Clip %d killed by OOM — retrying with lower memory ...", i)
+                    # Retry with more conservative settings
+                    clip_cmd_safe = [c for c in clip_cmd if c not in ("-bufsize", "2M")]
+                    clip_cmd_safe.extend(["-bufsize", "1M", "-threads", "1"])
+                    subprocess.run(clip_cmd_safe, check=True, capture_output=True, text=True, timeout=300)
+                else:
+                    raise
 
         # Phase 2: Concatenate all clips with xfade transitions + audio + watermark
         filter_parts: list[str] = []
@@ -570,7 +705,7 @@ def compose_slideshow(
                 f"[{current_label}][{next_label}]xfade=transition={style}:duration={transition_duration}:offset={xfade_offset}[{result_label}]"
             )
             current_label = result_label
-        final_label = "xfaded"
+        final_label = current_label
 
         wm_filter_str = _build_watermark_filter(
             _resolve_font(title_config.get("font_path") if title_config else None),
@@ -586,31 +721,54 @@ def compose_slideshow(
 
         filter_complex = "; ".join(filter_parts)
 
-        cmd = [
-            "ffmpeg", "-y",
-            *[arg for i in range(num_images) for arg in ("-i", clip_paths[i])],
-            "-i", audio_path,
-            "-filter_complex", filter_complex,
-            "-map", "[video]",
-            "-map", f"{num_images}:a",
-            "-c:v", "libx264",
-            "-preset", preset,
-            "-crf", str(crf),
-            "-c:a", "aac",
-            "-b:a", "192k",
-        ]
-        if abs(volume - 1.0) > 0.01:
-            cmd.extend(["-af", f"volume={volume}"])
-        cmd.extend([
-            "-shortest",
-            "-movflags", "+faststart",
-            "-max_muxing_queue_size", "1024",
-            output_path,
-        ])
+        # Pre-flight memory check: if OOM likely, skip straight to two-pass
+        video_total = display_duration * num_images - (num_images - 1) * transition_duration
+        est_mb = _estimate_ffmpeg_memory_mb(video_total, target_w, target_h)
+        avail_mb = _get_available_memory_mb()
+        if avail_mb is not None and est_mb > avail_mb * 0.7:
+            logger.warning(
+                "Estimated memory %d MB > 70%% of available %d MB — "
+                "using two-pass encoding to avoid OOM",
+                est_mb, avail_mb,
+            )
+            _encode_two_pass_fallback(
+                clip_paths, audio_path, output_path,
+                filter_complex, num_images, preset, crf, volume,
+            )
+        else:
+            if avail_mb is not None and est_mb > avail_mb * 0.5:
+                logger.info("Memory: estimated %d MB, available %d MB (tight)", est_mb, avail_mb)
+            elif avail_mb is not None:
+                logger.info("Memory: estimated %d MB, available %d MB", est_mb, avail_mb)
 
-        logger.info("Composing final video with %d clips and '%s' transitions ...",
-                     num_images, style)
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
+            cmd = [
+                "ffmpeg", "-y",
+                *[arg for i in range(num_images) for arg in ("-i", clip_paths[i])],
+                "-i", audio_path,
+                "-filter_complex", filter_complex,
+                "-map", "[video]",
+                "-map", f"{num_images}:a",
+                "-c:v", "libx264",
+                "-preset", preset,
+                "-crf", str(crf),
+                "-c:a", "aac",
+                "-b:a", "192k",
+            ]
+            if abs(volume - 1.0) > 0.01:
+                cmd.extend(["-af", f"volume={volume}"])
+            cmd.extend([
+                "-shortest",
+                "-movflags", "+faststart",
+                "-max_muxing_queue_size", "1024",
+                output_path,
+            ])
+
+            logger.info("Composing final video with %d clips and '%s' transitions ...",
+                         num_images, style)
+            _run_ffmpeg_with_oom_fallback(
+                cmd, clip_paths, audio_path, output_path,
+                filter_complex, num_images, preset, crf, volume,
+            )
 
         output_size = os.path.getsize(output_path)
         logger.info("Output file size: %d bytes", output_size)
