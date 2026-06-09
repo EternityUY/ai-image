@@ -1,0 +1,73 @@
+{
+  "_comment": "复制为 config.json 并填写实际值。所有字段均有默认值，可选择性覆盖。",
+  "minmax": {
+    "_comment": "MiniMax API 配置 — 用于图片生成",
+    "api_key": "YOUR_MINIMAX_API_KEY",
+    "base_url": "https://api.minimaxi.com/v1"
+  },
+  "generation": {
+    "_comment": "生成参数 — 图片/视频相关配置",
+    "image_count": 4,
+    "image_model": "image-01",
+    "image_size": "1024x1024",
+    "image_style": "水彩艺术插画",
+    "_prompts_comment": "图片生成提示词列表（数量 >= image_count）。程序会取前 image_count 个。",
+    "image_prompts": [
+      "梦幻星空下的宁静湖面，水彩风格，柔和的蓝紫色调",
+      "春日樱花飘落的街道，治愈系插画，温暖明亮",
+      "落日余晖洒在海面上，金色波浪，油画质感",
+      "森林深处的秘密花园，光影斑驳，童话风格",
+      "城市雨夜的霓虹倒影，赛博朋克风格，蓝粉色调"
+    ],
+    "music_dir": "music",
+    "_music_comment": "配乐文件夹路径（相对于项目根目录或绝对路径）。脚本会从中随机挑选音频文件。",
+    "video_aspect_ratio": "9:16",
+    "title_overlay": true,
+    "title_font_size": null,
+    "title_position": "bottom",
+    "title_font_path": "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "title_color": "white",
+    "title_stroke_color": "black",
+    "title_stroke_width": 2
+  },
+  "video": {
+    "_comment_video": "视频合成参数 — 转场、编码等",
+    "fps": 24,
+    "crf": 23,
+    "preset": "veryfast",
+    "_transition_comment": "转场效果：fade(淡入淡出), slideleft(左滑), slideright(右滑), slideup(上滑), slidedown(下滑), dissolve(溶解), 或自定义ffmpeg滤镜",
+    "transition": {
+      "style": "fade",
+      "duration": 1.0,
+      "overlap": true
+    },
+    "_display_comment": "每张图片展示时长（秒）。为0则自动按音乐时长均分。",
+    "image_duration": 0,
+    "_background_comment": "视频背景音乐设置（可选，为空则仅使用随机挑选的配乐）",
+    "background_music": {
+      "volume": 0.8
+    }
+  },
+  "upload": {
+    "_comment": "上传配置 — 使用 Spreado 上传到快手(KS)",
+    "enabled": true,
+    "platform": "kuaishou",
+    "cookies_path": "cookies",
+    "_cookies_comment": "首次使用请运行：spreado login kuaishou 进行登录。cookies 保存在 cookies/ 目录下。",
+    "video": {
+      "title": "AI影像《{theme}》",
+      "tags": "AI视频,AI生成,人工智能,影像创作",
+      "content": "AI自动生成的影像视频\n\n主题：{theme}\n\n#AI视频 #AI生成",
+      "schedule": ""
+    }
+  },
+  "cleanup": {
+    "_comment": "自动清理 — 超过 max_age_days 的输出文件夹将被删除",
+    "max_age_days": 7
+  },
+  "schedule": {
+    "_comment": "运行模式: single = 单次运行; daily = 每日定时运行",
+    "mode": "single",
+    "daily_time": "02:00"
+  }
+}
