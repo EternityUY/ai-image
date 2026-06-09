@@ -515,7 +515,6 @@ def compose_slideshow(
         # Each image is an input, looped for display_duration seconds
         filter_parts: list[str] = []
         input_parts: list[str] = []
-        extra_map: list[str] = []
 
         # Determine whether to apply Ken Burns zoom/pan effect
         kb_enabled = ken_burns_config and ken_burns_config.get("enabled", False)

@@ -200,7 +200,9 @@ FFmpeg xfade 支持的全部转场效果：
 
 ## 快手上传设置 (Kuaishou)
 
-本工程使用 [Spreado](https://github.com/BadKid90s/Spreado) 实现快手视频自动上传。
+本工程使用 [Spreado v1.2.0](https://github.com/BadKid90s/Spreado) 实现快手视频自动上传。
+
+Spreado **既是 CLI 工具，也是 Python 库**。本项目使用其 **Python API**（而非 CLI 子进程）调用上传，更稳定可靠。
 
 ### 1. 安装 Spreado
 
@@ -208,17 +210,20 @@ FFmpeg xfade 支持的全部转场效果：
 pip install spreado
 ```
 
-Spreado 基于 Playwright，会自动检测系统中已安装的 Chrome/Edge 浏览器。如无可用的浏览器，Playwright 会自动下载内置 Chromium。
+Spreado 依赖 Playwright，安装后会自动下载内置 Chromium 浏览器（约 150MB），无需额外配置。
 
-### 2. 快手登录（首次使用）
+### 2. 快手登录（首次使用，需要图形界面）
 
-运行以下命令，会弹出浏览器窗口进行快手登录：
+> **⚠️ 需要显示器/GUI 环境**：登录过程会弹出浏览器窗口，需要手动扫码或输入账号密码。  
+> 纯服务器/Docker 环境请看下方 **「在 Docker 中使用」** 章节。
 
 ```bash
 spreado login kuaishou
 ```
 
-登录成功后会保存 cookie 到本地目录（默认为当前目录下的 `cookies/`）。**cookie 有效期通常为几天到几周**，过期后需要重新登录。
+运行后会自动打开浏览器，请完成快手扫码登录。  
+登录成功后会保存 cookie 到 `cookies/kuaishou_uploader/account.json`。  
+**cookie 有效期通常为几天到几周**，过期后需要重新登录。
 
 ```bash
 # 验证登录状态
@@ -305,6 +310,95 @@ spreado verify kuaishou
 
 ---
 
+## 在 Docker / 无头服务器中使用
+
+本项目完全支持在 **无 GUI 的 Linux 服务器 / Docker 容器** 中运行。上传功能通过 Spreado Python API 调用，**上传过程是 headless 的**，无需浏览器窗口。
+
+### 工作原理
+
+| 步骤 | 需要图形界面？ | 说明 |
+|---|---|---|
+| **快手登录**（一次性） | ✅ **需要** | 必须在一台有显示器的机器上运行 `spreado login kuaishou` |
+| **自动上传**（日常运行） | ❌ **不需要** | Headless 模式，仅需有效 cookie + Playwright |
+
+### 首次设置流程
+
+**Step 1：在宿主机（有 GUI 的机器）上登录**
+
+```bash
+# 在宿主机安装 spreado
+pip install spreado
+
+# 快手登录（会弹出浏览器窗口）
+spreado login kuaishou
+```
+
+登录成功后 cookie 保存在 `cookies/kuaishou_uploader/account.json`。
+
+**Step 2：将 cookie 复制到 Docker 容器**
+
+```bash
+# 宿主机与容器共享目录，或者 docker cp 复制
+docker cp cookies/ <container_name>:/app/cookies/
+```
+
+建议通过 Docker volume 挂载 cookie 目录，这样 cookie 过期时更新宿主机 cookie 即可：
+
+```yaml
+# docker-compose.yml 示例
+volumes:
+  - ./cookies:/app/cookies
+```
+
+**Step 3：在 Docker 中运行项目**
+
+```bash
+# Dockerfile 中需安装 Chromium 依赖
+RUN pip install spreado && \
+    playwright install chromium  # 或 pip install 时自动下载
+
+# 运行管线（headless 上传，无需任何 DISPLAY 环境）
+python3 src/main.py
+```
+
+### Dockerfile 参考
+
+```dockerfile
+FROM python:3.12-slim
+
+# 安装系统依赖（Playwright Chromium 需要）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装 Python 依赖
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install spreado && pip install -r requirements.txt
+
+# 安装 Playwright Chromium（spreado 依赖）
+RUN python3 -m playwright install chromium
+
+# 复制项目文件
+COPY . .
+
+# 运行
+CMD ["python3", "src/main.py"]
+```
+
+### 环境变量（可选）
+
+Spreado 支持通过环境变量指定浏览器路径：
+
+| 变量 | 说明 |
+|---|---|
+| `SPREADO_BROWSER_PATH` | 指定浏览器可执行文件路径 |
+| `SPREADO_BROWSER_CHANNEL` | 指定浏览器通道 (`chrome` / `msedge`) |
+
+一般不需要设置 — Spreado 会自动使用 Playwright 内置的 Chromium。
+
+---
+
 ## 常见问题
 
 ### API Key 问题
@@ -316,10 +410,12 @@ spreado verify kuaishou
 ### 上传失败
 
 - **Spreado 未安装**：`pip install spreado`
-- **未登录快手**：运行 `spreado login kuaishou`
-- **Cookie 过期**：重新运行 `spreado login kuaishou`
+- **未登录快手**：运行 `spreado login kuaishou`（在宿主机有 GUI 的环境执行）
+- **Cookie 过期**：重新运行 `spreado login kuaishou`，然后重新拷贝 cookie 到容器
+- **Cookie 文件不存在**：检查 `cookies/kuaishou_uploader/account.json` 是否存在。首次使用需要先在有 GUI 的机器上登录
+- **Playwright 浏览器未安装**：运行 `python3 -m playwright install chromium`
 - **上传超时**：视频文件过大或网络问题，检查视频大小和网络连接
-- **浏览器问题**：确保安装了 Chrome/Edge 或 Playwright 可下载 Chromium
+- **报错 `No host key` / `Connection refused`**：容器缺少网络权限，确保 Docker 容器能正常访问外网（快手 CDN）
 
 ### FFmpeg 问题
 

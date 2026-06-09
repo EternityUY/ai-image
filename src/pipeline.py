@@ -165,7 +165,6 @@ def run_pipeline() -> dict:
     if gen_cfg.get("extract_cover", True) and image_paths:
         cover_jpg_path = os.path.join(folder_path, "cover.jpg")
         try:
-            from PIL import Image as PILImage
             from src.video_composer import _draw_title_on_image
 
             _draw_title_on_image(
