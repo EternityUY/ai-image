@@ -318,77 +318,147 @@ spreado verify kuaishou
 
 | 步骤 | 需要图形界面？ | 说明 |
 |---|---|---|
-| **快手登录**（一次性） | ✅ **需要** | 必须在一台有显示器的机器上运行 `spreado login kuaishou` |
-| **自动上传**（日常运行） | ❌ **不需要** | Headless 模式，仅需有效 cookie + Playwright |
+| **快手登录**（一次性） | ✅ **需要** | 在宿主机运行 `spreado login kuaishou`，弹出浏览器扫码登录 |
+| **自动上传**（日常运行） | ❌ **不需要** | Headless 模式，仅需有效 cookie + Playwright Chromium |
 
-### 首次设置流程
-
-**Step 1：在宿主机（有 GUI 的机器）上登录**
+### 快速部署（docker run）
 
 ```bash
-# 在宿主机安装 spreado
+# 1. 宿主机上准备数据目录
+mkdir -p ~/ai-image-data
+cp config.json ~/ai-image-data/config.json
+cp -r music ~/ai-image-data/music
+mkdir -p ~/ai-image-data/output
+
+# 2. 宿主机上快手登录（一次性，需要显示器）
+pip install spreado
+spreado login kuaishou
+# 登录后将 cookies 目录拷贝到数据目录
+cp -r cookies ~/ai-image-data/cookies
+
+# 3. 构建镜像
+docker build -t ai-image .
+
+# 4. 运行容器
+sudo docker run -d \
+  --name ai-image \
+  --restart unless-stopped \
+  -v ~/ai-image-data/config.json:/app/config.json:ro \
+  -v ~/ai-image-data/music:/app/music:ro \
+  -v ~/ai-image-data/cookies:/app/cookies:ro \
+  -v ~/ai-image-data/output:/app/output \
+  ai-image
+```
+
+### 数据卷说明
+
+| 挂载路径 | 宿主机目录 | 权限 | 说明 |
+|---|---|---|---|
+| `/app/config.json` | `~/ai-image-data/config.json` | `ro` 只读 | 配置文件（含 MiniMax API key 等） |
+| `/app/music` | `~/ai-image-data/music` | `ro` 只读 | 背景音乐文件目录 |
+| `/app/cookies` | `~/ai-image-data/cookies` | `ro` 只读 | Spreado 登录 cookie（仅在宿主机更新） |
+| `/app/output` | `~/ai-image-data/output` | `rw` 读写 | 生成的视频 / 图片 / 封面 |
+
+### 初次设置流程
+
+**Step 1：宿主机上登录快手（一次性）**
+
+```bash
+# 在宿主机（有显示器的机器）上安装 spreado
 pip install spreado
 
-# 快手登录（会弹出浏览器窗口）
+# 快手登录（会弹出浏览器窗口，扫码或账号密码登录）
 spreado login kuaishou
 ```
 
 登录成功后 cookie 保存在 `cookies/kuaishou_uploader/account.json`。
 
-**Step 2：将 cookie 复制到 Docker 容器**
+**Step 2：拷贝 cookie 到容器数据目录**
 
 ```bash
-# 宿主机与容器共享目录，或者 docker cp 复制
-docker cp cookies/ <container_name>:/app/cookies/
+cp -r cookies ~/ai-image-data/cookies
 ```
 
-建议通过 Docker volume 挂载 cookie 目录，这样 cookie 过期时更新宿主机 cookie 即可：
+**Step 3：启动容器**
+
+```bash
+sudo docker run -d \
+  --name ai-image \
+  --restart unless-stopped \
+  -v ~/ai-image-data/config.json:/app/config.json:ro \
+  -v ~/ai-image-data/music:/app/music:ro \
+  -v ~/ai-image-data/cookies:/app/cookies:ro \
+  -v ~/ai-image-data/output:/app/output \
+  ai-image
+```
+
+**Step 4：查看容器日志**
+
+```bash
+sudo docker logs -f ai-image
+```
+
+### docker-compose 部署（可选）
 
 ```yaml
-# docker-compose.yml 示例
-volumes:
-  - ./cookies:/app/cookies
+version: "3"
+services:
+  ai-image:
+    build: .
+    container_name: ai-image
+    restart: unless-stopped
+    volumes:
+      - ~/ai-image-data/config.json:/app/config.json:ro
+      - ~/ai-image-data/music:/app/music:ro
+      - ~/ai-image-data/cookies:/app/cookies:ro
+      - ~/ai-image-data/output:/app/output
 ```
 
-**Step 3：在 Docker 中运行项目**
+### 定时任务模式（daily）
 
-```bash
-# Dockerfile 中需安装 Chromium 依赖
-RUN pip install spreado && \
-    playwright install chromium  # 或 pip install 时自动下载
+配置 `config.json` 中的 `schedule` 以实现每日定时生成：
 
-# 运行管线（headless 上传，无需任何 DISPLAY 环境）
-python3 src/main.py
+```json
+{
+  "schedule": {
+    "mode": "daily",
+    "daily_time": "02:00"
+  }
+}
 ```
 
-### Dockerfile 参考
+容器会一直在后台运行，每天凌晨 2:00 自动执行一次管线。
+
+### Dockerfile
 
 ```dockerfile
 FROM python:3.12-slim
 
-# 安装系统依赖（Playwright Chromium 需要）
+WORKDIR /app
+
+# 系统依赖：FFmpeg + Playwright Chromium 所需库
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 Python 依赖
-WORKDIR /app
+# Python 依赖
 COPY requirements.txt .
-RUN pip install spreado && pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir spreado
 
-# 安装 Playwright Chromium（spreado 依赖）
+# Playwright Chromium（headless 模式）
 RUN python3 -m playwright install chromium
 
-# 复制项目文件
-COPY . .
+# 项目代码
+COPY src/ ./src/
 
-# 运行
+# 默认命令
 CMD ["python3", "src/main.py"]
 ```
 
 ### 环境变量（可选）
 
-Spreado 支持通过环境变量指定浏览器路径：
+Spreado 支持通过环境变量指定浏览器路径，一般不需要设置（自动使用 Playwright 内置 Chromium）：
 
 | 变量 | 说明 |
 |---|---|
