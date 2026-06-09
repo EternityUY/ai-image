@@ -2,11 +2,13 @@
 
 Uses FFmpeg xfade filter for transition effects between images.
 Duration is automatically matched to the audio track length.
+Supports Ken Burns zoom/pan effect and text watermark overlay.
 """
 
 import glob
 import logging
 import os
+import random
 import subprocess
 import sys
 import tempfile
@@ -181,7 +183,7 @@ def _draw_title(
     else:
         y_pos = target_h // 2
 
-    overlay_text = f"AI影像《{title}》"
+    overlay_text = str(title)
     logger.info("Adding title overlay: %s (font_size=%d, y=%d)",
                 overlay_text, font_size, y_pos)
 
@@ -262,6 +264,143 @@ def _verify_mp4(path: str) -> tuple[bool, str]:
         return True, "unverified (ffprobe unavailable)"
 
 
+def _build_zoompan_filter(
+    target_w: int,
+    target_h: int,
+    display_duration: float,
+    fps: int,
+    image_index: int,
+    zoom: float = 0.03,
+    pan: str = "random",
+) -> str:
+    """Build a zoompan filter string for Ken Burns effect on one image.
+
+    Creates a slow zoom-in with optional pan, making static wallpapers
+    feel dynamic. Returns a filter string like:
+      zoompan=z='...':x='...':y='...':d=120:s=1080x1920:fps=24
+
+    Args:
+        target_w: Output width.
+        target_h: Output height.
+        display_duration: How long this image appears (seconds).
+        fps: Output frame rate.
+        image_index: Used to seed random pan direction (deterministic per image).
+        zoom: Zoom amount (0.03 = 3% zoom-in over the duration).
+        pan: Direction — "random", "none", "left", "right", "up", "down".
+
+    Returns:
+        Full zoompan filter string.
+    """
+    n_frames = int(display_duration * fps)
+    if n_frames <= 1:
+        n_frames = 2  # avoid division by zero
+
+    # Resolve pan direction
+    if pan == "random":
+        dirs = ["left", "right", "up", "down", "none"]
+        rng = random.Random(image_index)
+        pan = rng.choice(dirs)
+
+    pan_frac = 0.02  # 2% of image dimension
+
+    # Expression: linearly interpolate zoom from 1.0 to 1.0+zoom
+    z_expr = f"1.0+{zoom}*(on-1)/({n_frames}-1)"
+
+    # Expression: optional pan
+    if pan == "none":
+        x_expr, y_expr = "iw/2", "ih/2"
+    elif pan == "left":
+        x_expr = f"iw/2-{pan_frac}*iw*(on-1)/({n_frames}-1)"
+        y_expr = "ih/2"
+    elif pan == "right":
+        x_expr = f"iw/2+{pan_frac}*iw*(on-1)/({n_frames}-1)"
+        y_expr = "ih/2"
+    elif pan == "up":
+        x_expr = "iw/2"
+        y_expr = f"ih/2-{pan_frac}*ih*(on-1)/({n_frames}-1)"
+    elif pan == "down":
+        x_expr = "iw/2"
+        y_expr = f"ih/2+{pan_frac}*ih*(on-1)/({n_frames}-1)"
+    else:
+        x_expr, y_expr = "iw/2", "ih/2"
+
+    return (
+        f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':"
+        f"d={n_frames}:s={target_w}x{target_h}:fps={fps}"
+    )
+
+
+def _build_watermark_filter(
+    font_path: str | None,
+    watermark_config: dict | None,
+    target_w: int,
+    target_h: int,
+) -> str | None:
+    """Build a drawtext filter string for watermark overlay.
+
+    Returns a filter string fragment, or None if watermark is disabled
+    or no font is available.
+
+    Example output:
+      drawtext=text='精选壁纸《1234》':fontfile=/path/to/font.ttf:...
+    """
+    if not watermark_config or not watermark_config.get("enabled", False):
+        return None
+
+    if font_path is None:
+        font_path = _resolve_font(None)
+        if font_path is None:
+            logger.warning("Watermark SKIPPED — no CJK font available for drawtext.")
+            return None
+
+    # Resolve text
+    template = watermark_config.get("template", "精选壁纸《{id}》")
+    wm_id = watermark_config.get("id", "")
+    text = template.replace("{id}", wm_id)
+    if not text.strip():
+        return None
+
+    font_size = watermark_config.get("font_size", 32)
+    color_raw = watermark_config.get("color", "white@0.6")
+    stroke_color_raw = watermark_config.get("stroke_color", "black@0.8")
+    stroke_width = watermark_config.get("stroke_width", 1.5)
+    margin = watermark_config.get("margin", 30)
+    position = watermark_config.get("position", "bottom-right")
+
+    # Parse color:alpha format (e.g. "white@0.6")
+    def _parse_color(val: str) -> str:
+        if "@" in val:
+            parts = val.split("@")
+            return f"{parts[0]}@{parts[1]}"
+        return val
+
+    color = _parse_color(color_raw)
+    stroke_color = _parse_color(stroke_color_raw)
+
+    # Position
+    pos_map = {
+        "bottom-right": f"x=W-tw-{margin}:y=H-th-{margin}",
+        "bottom-left": f"x={margin}:y=H-th-{margin}",
+        "top-right": f"x=W-tw-{margin}:y={margin}",
+        "top-left": f"x={margin}:y={margin}",
+        "center": "x=(W-tw)/2:y=(H-th)/2",
+        "bottom": f"x=(W-tw)/2:y=H-th-{margin}",
+        "top": f"x=(W-tw)/2:y={margin}",
+    }
+    pos_str = pos_map.get(position, pos_map["bottom-right"])
+
+    return (
+        f"drawtext=text='{text}':"
+        f"fontfile={font_path}:"
+        f"fontsize={font_size}:"
+        f"fontcolor={color}:"
+        f"borderw={stroke_width}:"
+        f"bordercolor={stroke_color}:"
+        f"{pos_str}:"
+        f"box=0"
+    )
+
+
 def compose_slideshow(
     image_paths: list[str],
     audio_path: str,
@@ -276,6 +415,8 @@ def compose_slideshow(
     preset: str = "veryfast",
     image_duration: float = 0,
     volume: float = 1.0,
+    ken_burns_config: dict | None = None,
+    watermark_config: dict | None = None,
 ) -> str:
     """Create a video slideshow from multiple images with transitions.
 
@@ -293,9 +434,12 @@ def compose_slideshow(
         transition_style: FFmpeg xfade transition name (fade, slideleft, etc.)
         transition_duration: Duration of each transition in seconds.
         fps: Output frame rate.
-        crf: H.264 CRF value (lower = better quality).
+        crf: H.264 CRV value (lower = better quality).
         preset: x264 preset.
         image_duration: Seconds per image. 0 = auto-calculate from audio.
+        volume: Background music volume (0.0~1.0).
+        ken_burns_config: Dict with enabled, zoom, pan keys for Ken Burns effect.
+        watermark_config: Dict with enabled, template, id, font_size, position, etc.
 
     Returns:
         Path to the generated video file.
@@ -373,31 +517,56 @@ def compose_slideshow(
         input_parts: list[str] = []
         extra_map: list[str] = []
 
-        for i in range(num_images):
-            input_parts.extend(["-loop", "1", "-t", str(display_duration), "-i", processed_images[i]])
+        # Determine whether to apply Ken Burns zoom/pan effect
+        kb_enabled = ken_burns_config and ken_burns_config.get("enabled", False)
+        kb_zoom = (ken_burns_config or {}).get("zoom", 0.03) if kb_enabled else 0
 
-        if num_images == 1:
-            # Single image: no transitions needed, just map the video directly
-            filter_parts.append(f"[0:v]format=yuv420p[video]")
-        else:
-            # Multiple images: chain xfade transitions
-            # Create setpts for each input
-            for i in range(num_images):
+        for i in range(num_images):
+            if kb_enabled and kb_zoom > 0:
+                # Single-frame input + zoompan for Ken Burns effect
+                input_parts.extend(["-i", processed_images[i]])
+                zp = _build_zoompan_filter(
+                    target_w, target_h, display_duration, fps, i,
+                    zoom=kb_zoom,
+                    pan=(ken_burns_config or {}).get("pan", "random"),
+                )
+                filter_parts.append(f"[{i}:v]{zp},format=rgba[label_v{i}]")
+            else:
+                # Looped input (static image)
+                input_parts.extend(["-loop", "1", "-t", str(display_duration), "-i", processed_images[i]])
                 filter_parts.append(f"[{i}:v]setpts=PTS-STARTPTS,format=rgba[label_v{i}]")
 
-            # Chain xfade transitions between consecutive images
+        # Chain xfade transitions between consecutive images
+        if num_images == 1:
+            final_label = "label_v0"
+        else:
             current_label = "label_v0"
             for i in range(1, num_images):
                 next_label = f"label_v{i}"
                 xfade_offset = i * (display_duration - transition_duration)
-                result_label = f"xf{i}" if i < num_images - 1 else "final"
+                result_label = f"xf{i}" if i < num_images - 1 else "xfaded"
                 filter_parts.append(
                     f"[{current_label}][{next_label}]xfade=transition={style}:duration={transition_duration}:offset={xfade_offset}[{result_label}]"
                 )
                 current_label = result_label
+            final_label = "xfaded"
 
-            # Add format conversion for final output
-            filter_parts.append("[final]format=yuv420p[video]")
+        # Apply watermark (drawtext) on the final video stream
+        wm_filter_str = _build_watermark_filter(
+            _resolve_font(title_config.get("font_path") if title_config else None),
+            watermark_config,
+            target_w,
+            target_h,
+        )
+        if wm_filter_str:
+            logger.info("Adding watermark overlay")
+            filter_parts.append(
+                f"[{final_label}]format=yuv420p,{wm_filter_str}[video]"
+            )
+        else:
+            filter_parts.append(
+                f"[{final_label}]format=yuv420p[video]"
+            )
 
         filter_complex = "; ".join(filter_parts)
 

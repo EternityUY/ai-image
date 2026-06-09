@@ -123,6 +123,12 @@ def run_pipeline() -> dict:
     image_duration = video_cfg.get("image_duration", 0)
     bgm_volume = video_cfg.get("background_music", {}).get("volume", 1.0)
 
+    # Ken Burns effect
+    ken_burns_config = video_cfg.get("ken_burns", {"enabled": False})
+
+    # Watermark
+    watermark_config = gen_cfg.get("watermark", {"enabled": False})
+
     # Title overlay
     title_overlay = gen_cfg.get("title_overlay", True)
     title_text = theme if title_overlay else None
@@ -148,6 +154,8 @@ def run_pipeline() -> dict:
         preset=video_cfg.get("preset", "veryfast"),
         image_duration=image_duration,
         volume=bgm_volume,
+        ken_burns_config=ken_burns_config,
+        watermark_config=watermark_config,
     )
 
     # ------------------------------------------------------------------
@@ -206,6 +214,8 @@ def run_pipeline() -> dict:
         "video_resolution": f"{target_size[0]}x{target_size[1]}",
         "video_duration": video_duration_str,
         "title_overlay": title_overlay,
+        "ken_burns": video_cfg.get("ken_burns", {}).get("enabled", False),
+        "watermark": gen_cfg.get("watermark", {}).get("enabled", False),
         "created_at": created_at,
         "video_file": "video.mp4",
         "image_files": [os.path.basename(p) for p in image_paths],

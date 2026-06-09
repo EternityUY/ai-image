@@ -7,17 +7,19 @@
   },
   "generation": {
     "_comment": "生成参数 — 图片/视频相关配置",
-    "image_count": 4,
+    "image_count": 5,
     "image_model": "image-01",
     "image_size": "1024x1024",
-    "image_style": "水彩艺术插画",
+    "image_style": "高清壁纸，精细画质，超高细节，色彩鲜艳",
     "_prompts_comment": "图片生成提示词列表（数量 >= image_count）。程序会取前 image_count 个。",
     "image_prompts": [
-      "梦幻星空下的宁静湖面，水彩风格，柔和的蓝紫色调",
-      "春日樱花飘落的街道，治愈系插画，温暖明亮",
-      "落日余晖洒在海面上，金色波浪，油画质感",
-      "森林深处的秘密花园，光影斑驳，童话风格",
-      "城市雨夜的霓虹倒影，赛博朋克风格，蓝粉色调"
+      "梦幻极光下的雪山湖泊，4K壁纸，深邃蓝紫调",
+      "落日余晖中的城市天际线，暖金色调，城市壁纸",
+      "清晨森林里的阳光洒落，丁达尔效应，自然壁纸",
+      "深空星系与星云，绚烂色彩，宇宙壁纸",
+      "赛博朋克风格雨夜霓虹街景，紫蓝粉调，氛围壁纸",
+      "水墨山水画风格的山谷云海，青绿基调，国风壁纸",
+      "粉色樱花飘落在古风建筑前，春日氛围，治愈壁纸"
     ],
     "music_dir": "music",
     "_music_comment": "配乐文件夹路径（相对于项目根目录或绝对路径）。脚本会从中随机挑选音频文件。",
@@ -28,36 +30,54 @@
     "title_font_path": "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
     "title_color": "white",
     "title_stroke_color": "black",
-    "title_stroke_width": 2
+    "title_stroke_width": 2,
+    "_watermark_comment": "视频水印 — 在视频每帧上叠加文字水印",
+    "watermark": {
+      "enabled": true,
+      "template": "精选壁纸《{id}》",
+      "id": "",
+      "font_size": 32,
+      "position": "bottom-right",
+      "color": "white@0.6",
+      "stroke_color": "black@0.8",
+      "stroke_width": 1.5,
+      "margin": 30
+    }
   },
   "video": {
-    "_comment_video": "视频合成参数 — 转场、编码等",
+    "_comment_video": "视频合成参数 — 转场、编码、特效等",
     "fps": 24,
-    "crf": 23,
-    "preset": "veryfast",
-    "_transition_comment": "转场效果：fade(淡入淡出), slideleft(左滑), slideright(右滑), slideup(上滑), slidedown(下滑), dissolve(溶解), 或自定义ffmpeg滤镜",
+    "crf": 20,
+    "preset": "medium",
+    "_transition_comment": "转场效果：fade(淡入淡出), smoothleft(左平滑滑动), smoothright(右平滑滑动), dissolve(溶解), slideleft, slideright, slideup, slidedown, circleopen, circleclose, pixelize, radial, zoomin 等",
     "transition": {
-      "style": "fade",
-      "duration": 1.0,
+      "style": "smoothleft",
+      "duration": 1.2,
       "overlap": true
     },
     "_display_comment": "每张图片展示时长（秒）。为0则自动按音乐时长均分。",
     "image_duration": 0,
-    "_background_comment": "视频背景音乐设置（可选，为空则仅使用随机挑选的配乐）",
+    "_ken_burns_comment": "Ken Burns 镜头推拉效果 — 让静态壁纸产生缓慢运镜的动态感",
+    "ken_burns": {
+      "enabled": true,
+      "zoom": 0.03,
+      "pan": "random"
+    },
+    "_background_comment": "视频背景音乐设置",
     "background_music": {
       "volume": 0.8
     }
   },
   "upload": {
     "_comment": "上传配置 — 使用 Spreado 上传到快手(KS)",
-    "enabled": true,
+    "enabled": false,
     "platform": "kuaishou",
     "cookies_path": "cookies",
     "_cookies_comment": "首次使用请运行：spreado login kuaishou 进行登录。cookies 保存在 cookies/ 目录下。",
     "video": {
-      "title": "AI影像《{theme}》",
-      "tags": "AI视频,AI生成,人工智能,影像创作",
-      "content": "AI自动生成的影像视频\n\n主题：{theme}\n\n#AI视频 #AI生成",
+      "title": "精选壁纸《{theme}》",
+      "tags": "精选壁纸,手机壁纸,4K壁纸,AI壁纸,高清壁纸,壁纸推荐",
+      "content": "✨ 精选高清壁纸推荐 ✨\n\n主题：{theme}\n\n每一张都是精挑细选的高清壁纸，适合手机锁屏和桌面使用。\n每天更新优质壁纸，喜欢的话关注不迷路～\n\n#精选壁纸 #手机壁纸 #4K壁纸 #AI壁纸 #壁纸推荐",
       "schedule": ""
     }
   },

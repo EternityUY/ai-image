@@ -36,10 +36,10 @@ def write_info_file(folder_path: str, info: dict[str, Any]) -> str:
     """Write info.txt into the output folder with generation metadata."""
     lines = [
         "=" * 40,
-        "  AI Image Video - Generation Info",
+        "  精选壁纸 - 壁纸推荐视频",
         "=" * 40,
         "",
-        f"主题 (Theme):     {info.get('theme', 'N/A')}",
+        f"主题:             {info.get('theme', 'N/A')}",
         f"图片风格:         {info.get('image_style', 'N/A')}",
         f"图片数量:         {info.get('image_count', 'N/A')}",
         f"图片模型:         {info.get('image_model', 'N/A')}",
@@ -49,6 +49,8 @@ def write_info_file(folder_path: str, info: dict[str, Any]) -> str:
         f"视频比例:         {info.get('video_aspect_ratio', '9:16')}",
         f"视频分辨率:       {info.get('video_resolution', 'N/A')}",
         f"视频时长:         {info.get('video_duration', 'N/A')}",
+        f"Ken Burns运镜:    {'开启' if info.get('ken_burns') else '关闭'}",
+        f"视频水印:         {'开启' if info.get('watermark') else '关闭'}",
         f"标题水印:         {'是' if info.get('title_overlay') else '否'}",
         f"生成时间:         {info.get('created_at', 'N/A')}",
         "",
@@ -80,12 +82,16 @@ def write_info_file(folder_path: str, info: dict[str, Any]) -> str:
         "",
     ])
 
-    lines.append(f"  {info.get('video_file', 'video.mp4')}      - 合成视频")
+    lines.append(f"  {info.get('video_file', 'video.mp4')}      - 壁纸视频")
     for fname in info.get("image_files", []):
-        lines.append(f"  {fname}    - 生成图片")
+        lines.append(f"  {fname}    - 壁纸图片")
     lines.append(f"  {info.get('music_file', '')}    - 配乐文件")
 
     lines.extend([
+        "",
+        "-" * 40,
+        "  精选壁纸推荐 · 每日更新",
+        "-" * 40,
         "",
         "=" * 40,
     ])

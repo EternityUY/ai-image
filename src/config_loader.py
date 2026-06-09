@@ -15,17 +15,20 @@ _DEFAULTS: dict[str, Any] = {
         "daily_time": "02:00",
     },
     "generation": {
-        "image_count": 4,
+        "image_count": 5,
         "image_model": "image-01",
         "image_size": "1024x1024",
-        "image_style": "水彩艺术插画",
+        "image_style": "高清壁纸，精细画质，超高细节，色彩鲜艳",
         "extract_cover": True,
         "extract_cover_time": 3.0,
         "image_prompts": [
-            "梦幻星空下的宁静湖面，水彩风格",
-            "春日樱花飘落的街道，治愈系插画",
-            "落日余晖洒在海面上，金色波浪",
-            "森林深处的秘密花园，光影斑驳",
+            "梦幻极光下的雪山湖泊，4K壁纸，深邃蓝紫调",
+            "落日余晖中的城市天际线，暖金色调，城市壁纸",
+            "清晨森林里的阳光洒落，丁达尔效应，自然壁纸",
+            "深空星系与星云，绚烂色彩，宇宙壁纸",
+            "赛博朋克风格雨夜霓虹街景，紫蓝粉调，氛围壁纸",
+            "水墨山水画风格的山谷云海，青绿基调，国风壁纸",
+            "粉色樱花飘落在古风建筑前，春日氛围，治愈壁纸",
         ],
         "music_dir": "music",
         "video_aspect_ratio": "9:16",
@@ -36,19 +39,37 @@ _DEFAULTS: dict[str, Any] = {
         "title_color": "white",
         "title_stroke_color": "black",
         "title_stroke_width": 2,
+        # 水印配置
+        "watermark": {
+            "enabled": True,
+            "template": "精选壁纸《{id}》",
+            "id": "",
+            "font_size": 32,
+            "position": "bottom-right",
+            "color": "white@0.6",
+            "stroke_color": "black@0.8",
+            "stroke_width": 1.5,
+            "margin": 30,
+        },
     },
     "video": {
         "fps": 24,
         "crf": 23,
         "preset": "veryfast",
         "transition": {
-            "style": "fade",
-            "duration": 1.0,
+            "style": "smoothleft",
+            "duration": 1.2,
             "overlap": True,
         },
         "image_duration": 0,
         "background_music": {
             "volume": 0.8,
+        },
+        # Ken Burns 镜头推拉效果 — 让静态壁纸产生动态感
+        "ken_burns": {
+            "enabled": True,
+            "zoom": 0.03,       # 整体缩放比例 (0.02~0.05 推荐)
+            "pan": "random",    # 平移方向: none / random / left / right / up / down
         },
     },
     "upload": {
@@ -56,9 +77,9 @@ _DEFAULTS: dict[str, Any] = {
         "platform": "kuaishou",
         "cookies_path": "cookies",
         "video": {
-            "title": "AI影像《{theme}》",
-            "tags": "AI视频,AI生成,人工智能",
-            "content": "AI自动生成的影像视频\n\n主题：{theme}\n\n#AI视频 #AI生成",
+            "title": "精选壁纸《{theme}》",
+            "tags": "精选壁纸,手机壁纸,4K壁纸,AI壁纸,高清壁纸,壁纸推荐",
+            "content": "✨ 精选高清壁纸推荐 ✨\n\n主题：{theme}\n\n每一张都是精挑细选的高清壁纸，适合手机锁屏和桌面使用。\n每天更新优质壁纸，喜欢的话关注不迷路～\n\n#精选壁纸 #手机壁纸 #4K壁纸 #AI壁纸 #壁纸推荐",
             "schedule": "",
         },
     },

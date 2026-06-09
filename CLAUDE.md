@@ -80,6 +80,8 @@ pip install ruff && ruff check src/
    - Optional title overlay rendered via Pillow on each frame
    - Transitions between images (configurable: fade, slide, dissolve, etc.)
    - Total duration auto-matched to audio track length
+   - **Ken Burns effect**: Optional zoom-pan animation on each image (via `zoompan` filter)
+   - **Watermark**: Optional text overlay on every frame (via `drawtext` filter)
 5. **Cover** — Generates `cover.jpg` from the first image with centered title
 6. **Output** — `output_manager.py` saves everything into `output/YYYY-MM-DD_HH-MM-SS_<slug>/` with `info.txt`
 7. **Upload** (optional) — `uploader.py` calls `spreado upload kuaishou` CLI to publish video
@@ -90,24 +92,35 @@ pip install ruff && ruff check src/
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `minmax.api_key` | string | — | **(必填)** MiniMax API key |
-| `generation.image_count` | int | `4` | 生成图片数量 (3-5 recommended) |
+| `generation.image_count` | int | `5` | 生成图片数量 (3-7 recommended) |
 | `generation.image_prompts` | string[] | — | 图片提示词列表，数量 >= image_count |
 | `generation.image_model` | string | `image-01` | MiniMax 图片模型 |
-| `generation.image_style` | string | `水彩艺术插画` | 图片艺术风格（追加到每个提示词后） |
+| `generation.image_style` | string | `高清壁纸，精细画质，超高细节，色彩鲜艳` | 图片艺术风格（追加到每个提示词后） |
 | `generation.image_size` | string | `1024x1024` | 图片尺寸 (用于API请求) |
 | `generation.music_dir` | string | `music` | 配乐文件夹路径 |
 | `generation.video_aspect_ratio` | string | `9:16` | 视频比例 (`16:9` / `9:16`) |
+| `generation.watermark.enabled` | bool | `true` | 是否启用视频水印 |
+| `generation.watermark.template` | string | `精选壁纸《{id}》` | 水印文字模板（支持 `{id}` 变量） |
+| `generation.watermark.id` | string | `""` | 水印编号/标识符 |
+| `generation.watermark.font_size` | int | `32` | 水印字号 |
+| `generation.watermark.position` | string | `bottom-right` | 水印位置: bottom-right / bottom-left / top-right / top-left / bottom / top / center |
+| `generation.watermark.color` | string | `white@0.6` | 水印颜色（`@` 后为透明度） |
+| `generation.watermark.stroke_color` | string | `black@0.8` | 描边颜色 |
+| `generation.watermark.stroke_width` | float | `1.5` | 描边宽度 |
 
-### Video Transitions
+### Video Transitions & Effects
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `video.transition.style` | string | `fade` | 转场效果: `fade`, `fadeblack`, `fadewhite`, `dissolve`, `slideleft`, `slideright`, `slideup`, `slidedown`, `smoothleft`, `smoothright`, `circleopen`, `circleclose`, `pixelize`, `radial`, `hblur`, `wipe`, `zoomin` 等 |
-| `video.transition.duration` | float | `1.0` | 转场时长（秒） |
+| `video.transition.style` | string | `smoothleft` | 转场效果: smoothleft, fade, dissolve, slideleft, slideright, slideup, slidedown, circleopen, circleclose, pixelize, radial, zoomin 等 |
+| `video.transition.duration` | float | `1.2` | 转场时长（秒） |
 | `video.fps` | int | `24` | 视频帧率 |
-| `video.crf` | int | `23` | H.264 CRF (18-28, 越小质量越好) |
-| `video.preset` | string | `veryfast` | x264 preset (ultrafast/superfast/veryfast/faster/fast/medium) |
+| `video.crf` | int | `20` | H.264 CRF (18-28, 越小质量越好) |
+| `video.preset` | string | `medium` | x264 preset (ultrafast/superfast/veryfast/faster/fast/medium) |
 | `video.image_duration` | float | `0` | 每张图片展示时长(秒)。0 = 自动按音乐时长均分 |
-| `video.background_music.volume` | float | `1.0` | 背景音乐音量 (0.0~1.0) |
+| `video.background_music.volume` | float | `0.8` | 背景音乐音量 (0.0~1.0) |
+| `video.ken_burns.enabled` | bool | `true` | Ken Burns 运镜效果（缓慢缩放+平移，让静态壁纸有动态感） |
+| `video.ken_burns.zoom` | float | `0.03` | 缩放比例 (0.02~0.05 推荐) |
+| `video.ken_burns.pan` | string | `random` | 平移方向: none / random / left / right / up / down |
 
 ### Upload (Kuaishou via Spreado)
 | Field | Type | Default | Description |
@@ -115,8 +128,8 @@ pip install ruff && ruff check src/
 | `upload.enabled` | bool | `false` | 是否启用自动上传到快手 |
 | `upload.platform` | string | `kuaishou` | 上传平台 (当前仅支持 kuaishou) |
 | `upload.cookies_path` | string | `cookies` | Spreado cookie 目录 |
-| `upload.video.title` | string | `AI影像《{theme}》` | 视频标题，支持 `{theme}` 变量 |
-| `upload.video.tags` | string | — | 逗号分隔的标签 |
+| `upload.video.title` | string | `精选壁纸《{theme}》` | 视频标题，支持 `{theme}` 变量 |
+| `upload.video.tags` | string | `精选壁纸,手机壁纸,4K壁纸,AI壁纸` | 逗号分隔的标签 |
 | `upload.video.content` | string | — | 视频描述，支持 `{theme}` 变量 |
 
 ### Transitions Reference
