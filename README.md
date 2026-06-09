@@ -74,7 +74,7 @@ mkdir -p music
 ### 4. 运行
 
 ```bash
-python3 src/main.py
+python3 -m src.main
 ```
 
 执行完成后，会在 `output/` 目录下生成一个带时间戳的文件夹：
@@ -220,7 +220,7 @@ RUN python3 -m playwright install chromium
 COPY src/ ./src/
 
 # 默认命令
-CMD ["python3", "src/main.py"]
+CMD ["python3", "-m", "src.main"]
 ```
 
 ### 工作原理

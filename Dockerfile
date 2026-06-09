@@ -19,4 +19,4 @@ RUN python3 -m playwright install chromium
 COPY src/ ./src/
 
 # Default command
-CMD ["python3", "src/main.py"]
+CMD ["python3", "-m", "src.main"]

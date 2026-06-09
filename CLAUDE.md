@@ -65,7 +65,7 @@ mkdir -p music
 ### 5. 运行管线
 
 ```bash
-python3 src/main.py
+python3 -m src.main
 ```
 
 ---
@@ -453,7 +453,7 @@ RUN python3 -m playwright install chromium
 COPY src/ ./src/
 
 # 默认命令
-CMD ["python3", "src/main.py"]
+CMD ["python3", "-m", "src.main"]
 ```
 
 ### 环境变量（可选）
@@ -545,7 +545,7 @@ Spreado 支持通过环境变量指定浏览器路径，一般不需要设置（
 
 ```bash
 # 运行管线（单次模式）
-python3 src/main.py
+python3 -m src.main
 
 # 导入检查
 python3 -c "from src.config_loader import get_config; from src.image_generator import ImageGenerator; from src.music_selector import select_random_music; from src.video_composer import compose_slideshow; from src.output_manager import create_output_folder, write_info_file; from src.uploader import upload_video; from src.cleanup import clean_old_folders; print('OK')"
