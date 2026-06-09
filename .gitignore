@@ -3,6 +3,7 @@ upload_config.json
 output/
 music/*.mp3
 cookies/
+logs/
 __pycache__/
 *.pyc
 .env
