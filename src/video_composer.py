@@ -493,6 +493,7 @@ def compose_slideshow(
     # Prepare a temp directory for processed images (with title overlay)
     tmp_dir = tempfile.mkdtemp(prefix="slideshow_")
     processed_images: list[str] = []
+    clip_paths: list[str] = []
 
     try:
         # Process each image: scale + center-crop + optional title
@@ -511,46 +512,66 @@ def compose_slideshow(
             processed_images.append(processed_path)
             logger.info("Processed image %d/%d: %s", idx + 1, num_images, img_path)
 
-        # Build the FFmpeg filter_complex for slideshow with xfade
-        # Each image is an input, looped for display_duration seconds
-        filter_parts: list[str] = []
-        input_parts: list[str] = []
-
         # Determine whether to apply Ken Burns zoom/pan effect
         kb_enabled = ken_burns_config and ken_burns_config.get("enabled", False)
         kb_zoom = (ken_burns_config or {}).get("zoom", 0.03) if kb_enabled else 0
 
+        # Phase 1: Render each image to its own temp video clip (one at a time)
+        # to avoid OOM from running multiple zoompan filters in parallel.
+        clip_paths: list[str] = []
+        n_frames = int(display_duration * fps)
         for i in range(num_images):
+            clip_path = os.path.join(tmp_dir, f"clip_{i:02d}.mp4")
+            clip_paths.append(clip_path)
             if kb_enabled and kb_zoom > 0:
-                # Single-frame input + zoompan for Ken Burns effect
-                input_parts.extend(["-i", processed_images[i]])
                 zp = _build_zoompan_filter(
                     target_w, target_h, display_duration, fps, i,
                     zoom=kb_zoom,
                     pan=(ken_burns_config or {}).get("pan", "random"),
                 )
-                filter_parts.append(f"[{i}:v]{zp},format=rgba[label_v{i}]")
+                clip_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", processed_images[i],
+                    "-filter_complex", f"{zp},format=yuv420p",
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-crf", str(crf),
+                    "-frames:v", str(n_frames),
+                    "-an",
+                    clip_path,
+                ]
             else:
-                # Looped input (static image)
-                input_parts.extend(["-loop", "1", "-t", str(display_duration), "-i", processed_images[i]])
-                filter_parts.append(f"[{i}:v]setpts=PTS-STARTPTS,format=rgba[label_v{i}]")
+                clip_cmd = [
+                    "ffmpeg", "-y",
+                    "-loop", "1",
+                    "-t", str(display_duration),
+                    "-i", processed_images[i],
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-crf", str(crf),
+                    "-pix_fmt", "yuv420p",
+                    "-an",
+                    clip_path,
+                ]
+            logger.info("Rendering clip %d/%d ...", i + 1, num_images)
+            subprocess.run(clip_cmd, check=True, capture_output=True, text=True, timeout=300)
 
-        # Chain xfade transitions between consecutive images
-        if num_images == 1:
-            final_label = "label_v0"
-        else:
-            current_label = "label_v0"
-            for i in range(1, num_images):
-                next_label = f"label_v{i}"
-                xfade_offset = i * (display_duration - transition_duration)
-                result_label = f"xf{i}" if i < num_images - 1 else "xfaded"
-                filter_parts.append(
-                    f"[{current_label}][{next_label}]xfade=transition={style}:duration={transition_duration}:offset={xfade_offset}[{result_label}]"
-                )
-                current_label = result_label
-            final_label = "xfaded"
+        # Phase 2: Concatenate all clips with xfade transitions + audio + watermark
+        filter_parts: list[str] = []
+        for i in range(num_images):
+            filter_parts.append(f"[{i}:v]setpts=PTS-STARTPTS,format=rgba[label_v{i}]")
 
-        # Apply watermark (drawtext) on the final video stream
+        current_label = "label_v0"
+        for i in range(1, num_images):
+            next_label = f"label_v{i}"
+            xfade_offset = i * (display_duration - transition_duration)
+            result_label = f"xf{i}" if i < num_images - 1 else "xfaded"
+            filter_parts.append(
+                f"[{current_label}][{next_label}]xfade=transition={style}:duration={transition_duration}:offset={xfade_offset}[{result_label}]"
+            )
+            current_label = result_label
+        final_label = "xfaded"
+
         wm_filter_str = _build_watermark_filter(
             _resolve_font(title_config.get("font_path") if title_config else None),
             watermark_config,
@@ -559,20 +580,15 @@ def compose_slideshow(
         )
         if wm_filter_str:
             logger.info("Adding watermark overlay")
-            filter_parts.append(
-                f"[{final_label}]format=yuv420p,{wm_filter_str}[video]"
-            )
+            filter_parts.append(f"[{final_label}]format=yuv420p,{wm_filter_str}[video]")
         else:
-            filter_parts.append(
-                f"[{final_label}]format=yuv420p[video]"
-            )
+            filter_parts.append(f"[{final_label}]format=yuv420p[video]")
 
         filter_complex = "; ".join(filter_parts)
 
-        # Build the FFmpeg command
         cmd = [
             "ffmpeg", "-y",
-            *input_parts,
+            *[arg for i in range(num_images) for arg in ("-i", clip_paths[i])],
             "-i", audio_path,
             "-filter_complex", filter_complex,
             "-map", "[video]",
@@ -583,11 +599,8 @@ def compose_slideshow(
             "-c:a", "aac",
             "-b:a", "192k",
         ]
-
-        # Apply volume filter if not 1.0
         if abs(volume - 1.0) > 0.01:
             cmd.extend(["-af", f"volume={volume}"])
-
         cmd.extend([
             "-shortest",
             "-movflags", "+faststart",
@@ -595,10 +608,8 @@ def compose_slideshow(
             output_path,
         ])
 
-        logger.info("Encoding video with %d images and '%s' transitions ...",
+        logger.info("Composing final video with %d clips and '%s' transitions ...",
                      num_images, style)
-        logger.debug("ffmpeg command: %s", " ".join(cmd))
-
         subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
 
         output_size = os.path.getsize(output_path)
@@ -622,8 +633,8 @@ def compose_slideshow(
     except subprocess.TimeoutExpired:
         raise RuntimeError("ffmpeg timed out (600s).") from None
     finally:
-        # Clean up temp images
-        for p in processed_images:
+        # Clean up temp images and clips
+        for p in processed_images + clip_paths:
             if os.path.isfile(p):
                 os.unlink(p)
         if os.path.isdir(tmp_dir):
