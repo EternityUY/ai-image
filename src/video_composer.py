@@ -257,18 +257,23 @@ def _encode_two_pass_fallback(
     """Two-pass encoding as OOM-safe fallback: silent video first, then mux audio."""
     silent_path = output_path + ".silent.mp4"
     try:
-        # Pass 1 — silent slideshow (no audio muxer → smaller internal queues)
+        # Pass 1 — silent slideshow with fast preset to avoid muxer queue overflow.
+        # Even though the user may have configured a slow preset (e.g. medium),
+        # pass 1 is an intermediate file — quality is preserved via the same CRF,
+        # and the final video quality is determined by pass 2's stream copy.
+        # Without -preset veryfast the encoder can't keep up with the xfade filter
+        # chain, causing exit code 234 (muxer queue overflow) regardless of queue size.
         cmd1 = [
             "ffmpeg", "-y",
             *[arg for i in range(num_clips) for arg in ("-i", clip_paths[i])],
             "-filter_complex", filter_complex,
             "-map", "[video]",
             "-c:v", "libx264",
-            "-preset", preset,
+            "-preset", "veryfast",
             "-crf", str(crf),
             "-an",
             "-threads", "2",
-            "-bufsize", "2M",
+            "-max_muxing_queue_size", "99999",
             silent_path,
         ]
         logger.info("Two-pass — pass 1: encoding silent slideshow")
@@ -338,33 +343,18 @@ def _run_ffmpeg_with_oom_fallback(
                 filter_complex, num_clips, preset, crf, volume,
             )
         elif e.returncode in (234,):
-            # Exit code 234 typically means max_muxing_queue_size exceeded
-            # due to xfade producing uneven frame output — retry with larger queue
+            # Exit code 234 = muxer queue overflow. The primary command already
+            # uses a 99999 queue, so retrying with a larger queue won't help.
+            # Root cause is the encoder being too slow for the filter chain;
+            # two-pass fallback fixes this by using -preset veryfast in pass 1.
             logger.warning(
-                "ffmpeg exit code 234 (muxer queue) — retrying with larger queue size",
+                "ffmpeg exit code 234 (muxer queue overflow) — "
+                "falling back to two-pass encoding",
             )
-            # Increase max_muxing_queue_size and retry
-            safe_cmd = list(cmd)
-            for i, arg in enumerate(safe_cmd):
-                if arg == "-max_muxing_queue_size":
-                    current_val = int(safe_cmd[i + 1])
-                    safe_cmd[i + 1] = str(current_val * 4)
-                    break
-            else:
-                safe_cmd.extend(["-max_muxing_queue_size", "4096"])
-            try:
-                subprocess.run(safe_cmd, check=True, capture_output=True, text=True, timeout=timeout)
-            except subprocess.CalledProcessError:
-                # Retry with larger queue also failed — fall back to two-pass encoding
-                # which avoids the muxer queue issue by encoding video without audio first
-                logger.warning(
-                    "ffmpeg exit code 234 (muxer queue) — retry also failed, "
-                    "falling back to two-pass encoding",
-                )
-                _encode_two_pass_fallback(
-                    clip_paths, audio_path, output_path,
-                    filter_complex, num_clips, preset, crf, volume,
-                )
+            _encode_two_pass_fallback(
+                clip_paths, audio_path, output_path,
+                filter_complex, num_clips, preset, crf, volume,
+            )
         else:
             raise
 
@@ -787,7 +777,7 @@ def compose_slideshow(
             cmd.extend([
                 "-shortest",
                 "-movflags", "+faststart",
-                "-max_muxing_queue_size", "8192",
+                "-max_muxing_queue_size", "99999",
                 output_path,
             ])
 
