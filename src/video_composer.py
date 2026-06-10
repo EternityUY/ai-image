@@ -11,6 +11,7 @@ Watermark and title overlays are drawn onto each image via PIL before encoding.
 import glob
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -543,4 +544,4 @@ def compose_slideshow(
         if os.path.isfile(silent_p):
             os.unlink(silent_p)
         if os.path.isdir(tmp_dir):
-            os.rmdir(tmp_dir)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
