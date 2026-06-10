@@ -1,14 +1,16 @@
-"""Video composer — creates a slideshow video from multiple images with transitions.
+"""Video composer — creates a slideshow video from multiple images.
 
-Uses FFmpeg xfade filter for transition effects between images.
-Duration is automatically matched to the audio track length.
-Supports Ken Burns zoom/pan effect and text watermark overlay.
+Follows the two-pass approach from ai-music:
+  Pass 1: Concatenate pre-processed images via ffmpeg concat demuxer → silent video
+  Pass 2: Mux audio via stream copy (or re-encode if volume adjustment needed)
+
+No xfade transitions — simple hard cuts between images. No Ken Burns zoompan.
+Watermark and title overlays are drawn onto each image via PIL before encoding.
 """
 
 import glob
 import logging
 import os
-import random
 import subprocess
 import sys
 import tempfile
@@ -38,33 +40,6 @@ if _IS_WINDOWS:
         "C:/Windows/Fonts/simsun.ttc",
         "C:/Windows/Fonts/simhei.ttf",
     ]
-
-# Supported xfade transition styles
-_TRANSITION_STYLES = {
-    "fade": "fade",
-    "fadeblack": "fadeblack",
-    "fadewhite": "fadewhite",
-    "dissolve": "dissolve",
-    "slideleft": "slideleft",
-    "slideright": "slideright",
-    "slideup": "slideup",
-    "slidedown": "slidedown",
-    "smoothleft": "smoothleft",
-    "smoothright": "smoothright",
-    "smoothup": "smoothup",
-    "smoothdown": "smoothdown",
-    "circleopen": "circleopen",
-    "circleclose": "circleclose",
-    "rectopen": "rectopen",
-    "rectclose": "rectclose",
-    "pixelize": "pixelize",
-    "radial": "radial",
-    "hblur": "hblur",
-    "wipetl": "wipetl",
-    "wipe": "wipe",
-    "zoomin": "zoomin",
-    "hlslice": "hlslice",
-}
 
 
 def _resolve_font(configured_path: str | None) -> str | None:
@@ -216,147 +191,113 @@ def _draw_title(
     return True
 
 
-def _get_available_memory_mb() -> int | None:
-    """Get available system memory in MiB, or None if unknown (non-Linux)."""
-    if _IS_WINDOWS:
-        return None
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) // 1024
-    except (FileNotFoundError, ValueError, IndexError, OSError):
-        pass
-    return None
+def _draw_watermark(
+    bg: Image.Image,
+    watermark_config: dict | None,
+    target_w: int,
+    target_h: int,
+) -> bool:
+    """Draw watermark text onto bg via PIL (mutates in-place).
 
+    Supports the same config options as the old `_build_watermark_filter()`
+    but draws directly via PIL instead of using ffmpeg drawtext, eliminating
+    the need for font file resolution in the ffmpeg command.
 
-def _estimate_ffmpeg_memory_mb(video_duration: float, width: int, height: int) -> int:
-    """Estimate ffmpeg peak memory in MiB for a concat + xfade encode.
+    Args:
+        bg: RGBA image to draw on.
+        watermark_config: Dict with enabled, template, id, font_size,
+                          position, color, stroke_color, stroke_width, margin.
+        target_w: Target video width.
+        target_h: Target video height.
 
-    Model: x264 frame buffer pool for the concat phase:
-      - Each YUV420p frame = width × height × 1.5 bytes
-      - xfade needs 2 input frames decoded simultaneously
-      - encoder lookahead / ref frames for preset=medium ≈ 30 buffers
-      - Add 128 MiB safety margin for muxer / audio / filter graph
+    Returns:
+        True if watermark was drawn, False if skipped.
     """
-    per_frame = (width * height * 1.5) / (1024 * 1024)
-    buffer_count = min(40, max(15, int(video_duration * 24 * 0.3)))
-    return int(per_frame * buffer_count * 2) + 128
+    if not watermark_config or not watermark_config.get("enabled", False):
+        return False
 
+    font_path = _resolve_font(None)
+    if font_path is None:
+        logger.warning("Watermark SKIPPED — no CJK font available.")
+        return False
 
-def _encode_two_pass_fallback(
-    clip_paths: list[str],
-    audio_path: str,
-    output_path: str,
-    filter_complex: str,
-    num_clips: int,
-    preset: str,
-    crf: int,
-    volume: float,
-) -> str:
-    """Two-pass encoding as OOM-safe fallback: silent video first, then mux audio."""
-    silent_path = output_path + ".silent.mp4"
-    try:
-        # Pass 1 — silent slideshow with fast preset to avoid muxer queue overflow.
-        # Even though the user may have configured a slow preset (e.g. medium),
-        # pass 1 is an intermediate file — quality is preserved via the same CRF,
-        # and the final video quality is determined by pass 2's stream copy.
-        # Without -preset veryfast the encoder can't keep up with the xfade filter
-        # chain, causing exit code 234 (muxer queue overflow) regardless of queue size.
-        cmd1 = [
-            "ffmpeg", "-y",
-            *[arg for i in range(num_clips) for arg in ("-i", clip_paths[i])],
-            "-filter_complex", filter_complex,
-            "-map", "[video]",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", str(crf),
-            "-an",
-            "-threads", "2",
-            "-max_muxing_queue_size", "99999",
-            silent_path,
-        ]
-        logger.info("Two-pass — pass 1: encoding silent slideshow")
-        subprocess.run(cmd1, check=True, capture_output=True, text=True, timeout=600)
+    # Resolve text
+    template = watermark_config.get("template", "精选壁纸《{id}》")
+    wm_id = watermark_config.get("id", "")
+    text = template.replace("{id}", wm_id)
+    if not text.strip():
+        return False
 
-        s1_size = os.path.getsize(silent_path)
-        logger.info("Two-pass — pass 1 done: %s (%d bytes)", silent_path, s1_size)
+    font_size = watermark_config.get("font_size", 32)
+    stroke_width_wm = watermark_config.get("stroke_width", 1.5)
+    margin = watermark_config.get("margin", 30)
+    position = watermark_config.get("position", "bottom-right")
+    color_raw = watermark_config.get("color", "white@0.6")
+    stroke_color_raw = watermark_config.get("stroke_color", "black@0.8")
 
-        # Pass 2 — mux audio via stream copy (near-zero CPU/memory)
-        cmd2 = [
-            "ffmpeg", "-y",
-            "-i", silent_path,
-            "-i", audio_path,
-            "-c", "copy",
-            "-movflags", "+faststart",
-            output_path,
-        ]
-        if abs(volume - 1.0) > 0.01:
-            # Volume filter requires re-encode of audio
-            cmd2 = [
-                "ffmpeg", "-y",
-                "-i", silent_path,
-                "-i", audio_path,
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                "-af", f"volume={volume}",
-                "-movflags", "+faststart",
-                output_path,
-            ]
-        logger.info("Two-pass — pass 2: muxing audio")
-        subprocess.run(cmd2, check=True, capture_output=True, text=True, timeout=120)
-
-        logger.info("Two-pass done: %s", output_path)
-        return output_path
-
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        raise RuntimeError(f"Two-pass ffmpeg failed: {e}") from e
-    finally:
-        if silent_path and os.path.isfile(silent_path):
-            os.unlink(silent_path)
-
-
-def _run_ffmpeg_with_oom_fallback(
-    cmd: list[str],
-    clip_paths: list[str],
-    audio_path: str,
-    output_path: str,
-    filter_complex: str,
-    num_clips: int,
-    preset: str,
-    crf: int,
-    volume: float,
-    timeout: int = 600,
-) -> None:
-    """Run ffmpeg; if killed by SIGKILL/OOM, retry with two-pass fallback."""
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout)
-    except subprocess.CalledProcessError as e:
-        if e.returncode in (-9, 137):
-            logger.warning(
-                "ffmpeg killed by signal %d (OOM) — falling back to two-pass encoding",
-                e.returncode,
-            )
-            _encode_two_pass_fallback(
-                clip_paths, audio_path, output_path,
-                filter_complex, num_clips, preset, crf, volume,
-            )
-        elif e.returncode in (234,):
-            # Exit code 234 = muxer queue overflow. The primary command already
-            # uses a 99999 queue, so retrying with a larger queue won't help.
-            # Root cause is the encoder being too slow for the filter chain;
-            # two-pass fallback fixes this by using -preset veryfast in pass 1.
-            logger.warning(
-                "ffmpeg exit code 234 (muxer queue overflow) — "
-                "falling back to two-pass encoding",
-            )
-            _encode_two_pass_fallback(
-                clip_paths, audio_path, output_path,
-                filter_complex, num_clips, preset, crf, volume,
-            )
+    # Parse "color@alpha" format (e.g. "white@0.6")
+    def _parse_color(val: str) -> tuple[int, int, int, int]:
+        if "@" in val:
+            parts = val.split("@")
+            name = parts[0]
+            alpha = max(0, min(255, int(float(parts[1]) * 255)))
         else:
-            raise
+            name = val
+            alpha = 255
+        rgb_map = {
+            "white": (255, 255, 255),
+            "black": (0, 0, 0),
+            "yellow": (255, 255, 0),
+            "red": (255, 0, 0),
+            "blue": (0, 0, 255),
+            "green": (0, 255, 0),
+        }
+        r, g, b = rgb_map.get(name, (255, 255, 255))
+        return (r, g, b, alpha)
+
+    color = _parse_color(color_raw)
+    stroke_color_pil = _parse_color(stroke_color_raw)
+
+    try:
+        font_obj = ImageFont.truetype(font_path, font_size)
+    except Exception as exc:
+        logger.warning("Failed to load font for watermark: %s", exc)
+        return False
+
+    # Measure text
+    bbox = font_obj.getbbox(text)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    sw = max(1, int(stroke_width_wm))
+    pad = sw + 4
+    canvas_w = text_w + pad * 2
+    canvas_h = int((text_h + pad * 2) * 1.2)
+
+    # Render text on transparent canvas
+    overlay = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    if sw > 0:
+        for dx in range(-sw, sw + 1):
+            for dy in range(-sw, sw + 1):
+                if dx * dx + dy * dy <= sw * sw:
+                    draw.text((pad + dx, pad + dy), text, font=font_obj, fill=stroke_color_pil)
+    draw.text((pad, pad), text, font=font_obj, fill=color)
+
+    # Position
+    pos_map = {
+        "bottom-right": (target_w - canvas_w - margin, target_h - canvas_h - margin),
+        "bottom-left": (margin, target_h - canvas_h - margin),
+        "top-right": (target_w - canvas_w - margin, margin),
+        "top-left": (margin, margin),
+        "center": ((target_w - canvas_w) // 2, (target_h - canvas_h) // 2),
+        "bottom": ((target_w - canvas_w) // 2, target_h - canvas_h - margin),
+        "top": ((target_w - canvas_w) // 2, margin),
+    }
+    x, y = pos_map.get(position, pos_map["bottom-right"])
+
+    bg.paste(overlay, (x, y), overlay)
+    return True
 
 
 def _get_audio_duration(audio_path: str) -> float:
@@ -407,143 +348,6 @@ def _verify_mp4(path: str) -> tuple[bool, str]:
         return True, "unverified (ffprobe unavailable)"
 
 
-def _build_zoompan_filter(
-    target_w: int,
-    target_h: int,
-    display_duration: float,
-    fps: int,
-    image_index: int,
-    zoom: float = 0.03,
-    pan: str = "random",
-) -> str:
-    """Build a zoompan filter string for Ken Burns effect on one image.
-
-    Creates a slow zoom-in with optional pan, making static wallpapers
-    feel dynamic. Returns a filter string like:
-      zoompan=z='...':x='...':y='...':d=120:s=1080x1920:fps=24
-
-    Args:
-        target_w: Output width.
-        target_h: Output height.
-        display_duration: How long this image appears (seconds).
-        fps: Output frame rate.
-        image_index: Used to seed random pan direction (deterministic per image).
-        zoom: Zoom amount (0.03 = 3% zoom-in over the duration).
-        pan: Direction — "random", "none", "left", "right", "up", "down".
-
-    Returns:
-        Full zoompan filter string.
-    """
-    n_frames = int(display_duration * fps)
-    if n_frames <= 1:
-        n_frames = 2  # avoid division by zero
-
-    # Resolve pan direction
-    if pan == "random":
-        dirs = ["left", "right", "up", "down", "none"]
-        rng = random.Random(image_index)
-        pan = rng.choice(dirs)
-
-    pan_frac = 0.02  # 2% of image dimension
-
-    # Expression: linearly interpolate zoom from 1.0 to 1.0+zoom
-    z_expr = f"1.0+{zoom}*(on-1)/({n_frames}-1)"
-
-    # Expression: optional pan
-    if pan == "none":
-        x_expr, y_expr = "iw/2", "ih/2"
-    elif pan == "left":
-        x_expr = f"iw/2-{pan_frac}*iw*(on-1)/({n_frames}-1)"
-        y_expr = "ih/2"
-    elif pan == "right":
-        x_expr = f"iw/2+{pan_frac}*iw*(on-1)/({n_frames}-1)"
-        y_expr = "ih/2"
-    elif pan == "up":
-        x_expr = "iw/2"
-        y_expr = f"ih/2-{pan_frac}*ih*(on-1)/({n_frames}-1)"
-    elif pan == "down":
-        x_expr = "iw/2"
-        y_expr = f"ih/2+{pan_frac}*ih*(on-1)/({n_frames}-1)"
-    else:
-        x_expr, y_expr = "iw/2", "ih/2"
-
-    return (
-        f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':"
-        f"d={n_frames}:s={target_w}x{target_h}:fps={fps}"
-    )
-
-
-def _build_watermark_filter(
-    font_path: str | None,
-    watermark_config: dict | None,
-    target_w: int,
-    target_h: int,
-) -> str | None:
-    """Build a drawtext filter string for watermark overlay.
-
-    Returns a filter string fragment, or None if watermark is disabled
-    or no font is available.
-
-    Example output:
-      drawtext=text='精选壁纸《1234》':fontfile=/path/to/font.ttf:...
-    """
-    if not watermark_config or not watermark_config.get("enabled", False):
-        return None
-
-    if font_path is None:
-        font_path = _resolve_font(None)
-        if font_path is None:
-            logger.warning("Watermark SKIPPED — no CJK font available for drawtext.")
-            return None
-
-    # Resolve text
-    template = watermark_config.get("template", "精选壁纸《{id}》")
-    wm_id = watermark_config.get("id", "")
-    text = template.replace("{id}", wm_id)
-    if not text.strip():
-        return None
-
-    font_size = watermark_config.get("font_size", 32)
-    color_raw = watermark_config.get("color", "white@0.6")
-    stroke_color_raw = watermark_config.get("stroke_color", "black@0.8")
-    stroke_width = watermark_config.get("stroke_width", 1.5)
-    margin = watermark_config.get("margin", 30)
-    position = watermark_config.get("position", "bottom-right")
-
-    # Parse color:alpha format (e.g. "white@0.6")
-    def _parse_color(val: str) -> str:
-        if "@" in val:
-            parts = val.split("@")
-            return f"{parts[0]}@{parts[1]}"
-        return val
-
-    color = _parse_color(color_raw)
-    stroke_color = _parse_color(stroke_color_raw)
-
-    # Position
-    pos_map = {
-        "bottom-right": f"x=W-tw-{margin}:y=H-th-{margin}",
-        "bottom-left": f"x={margin}:y=H-th-{margin}",
-        "top-right": f"x=W-tw-{margin}:y={margin}",
-        "top-left": f"x={margin}:y={margin}",
-        "center": "x=(W-tw)/2:y=(H-th)/2",
-        "bottom": f"x=(W-tw)/2:y=H-th-{margin}",
-        "top": f"x=(W-tw)/2:y={margin}",
-    }
-    pos_str = pos_map.get(position, pos_map["bottom-right"])
-
-    return (
-        f"drawtext=text='{text}':"
-        f"fontfile={font_path}:"
-        f"fontsize={font_size}:"
-        f"fontcolor={color}:"
-        f"borderw={stroke_width}:"
-        f"bordercolor={stroke_color}:"
-        f"{pos_str}:"
-        f"box=0"
-    )
-
-
 def compose_slideshow(
     image_paths: list[str],
     audio_path: str,
@@ -561,11 +365,12 @@ def compose_slideshow(
     ken_burns_config: dict | None = None,
     watermark_config: dict | None = None,
 ) -> str:
-    """Create a video slideshow from multiple images with transitions.
+    """Create a video slideshow from multiple images with hard cuts.
 
-    Images are processed (scaled + cropped to target, optional title overlay)
-    and then stitched together with FFmpeg xfade transitions. The total video
-    duration matches the audio track.
+    Follows the ai-music two-pass approach:
+      Pass 1 — Concatenate pre-processed PNGs via ffmpeg concat demuxer
+               into a silent video (with `-preset veryfast` and `-tune stillimage`).
+      Pass 2 — Mux audio via stream copy (or re-encode if volume adjustment needed).
 
     Args:
         image_paths: List of paths to input images.
@@ -574,14 +379,14 @@ def compose_slideshow(
         target_size: (width, height) of the output video.
         title: Optional title for overlay text.
         title_config: Dict with font_path, font_size, position, color, etc.
-        transition_style: FFmpeg xfade transition name (fade, slideleft, etc.)
-        transition_duration: Duration of each transition in seconds.
-        fps: Output frame rate.
-        crf: H.264 CRV value (lower = better quality).
-        preset: x264 preset.
+        transition_style: IGNORED (kept for API compatibility).
+        transition_duration: IGNORED (kept for API compatibility).
+        fps: IGNORED (kept for API compatibility).
+        crf: H.264 CRF value (lower = better quality).
+        preset: IGNORED (pass 1 always uses ``veryfast``).
         image_duration: Seconds per image. 0 = auto-calculate from audio.
         volume: Background music volume (0.0~1.0).
-        ken_burns_config: Dict with enabled, zoom, pan keys for Ken Burns effect.
+        ken_burns_config: IGNORED (kept for API compatibility).
         watermark_config: Dict with enabled, template, id, font_size, position, etc.
 
     Returns:
@@ -603,196 +408,114 @@ def compose_slideshow(
     if audio_duration <= 0:
         raise ValueError(f"Audio has invalid duration ({audio_duration}s)")
 
-    # Calculate display duration per image
-    if image_duration <= 0:
-        # Auto-calculate: (audio_duration - (num_images - 1) * transition_duration) / num_images
-        total_overlap = (num_images - 1) * transition_duration
-        if total_overlap >= audio_duration:
-            logger.warning(
-                "Transition overlap (%f s) >= audio duration (%f s). "
-                "Reducing transition_duration.",
-                total_overlap, audio_duration,
-            )
-            transition_duration = audio_duration / (num_images + 1) * 0.5
-            total_overlap = (num_images - 1) * transition_duration
-        display_duration = (audio_duration - total_overlap) / num_images
-        logger.info(
-            "Auto-calculated: display_duration=%.2fs (N=%d, audio=%.2fs, overlap=%.2fs)",
-            display_duration, num_images, audio_duration, total_overlap,
-        )
-    else:
+    # Calculate per-image display duration (simple division, no transitions)
+    if image_duration > 0:
         display_duration = image_duration
-        expected = num_images * display_duration - (num_images - 1) * transition_duration
+        logger.info("Fixed image_duration=%.2fs", display_duration)
+    else:
+        display_duration = audio_duration / num_images
         logger.info(
-            "Fixed image_duration=%.2fs (expected total=%.2fs, audio=%.2fs)",
-            display_duration, expected, audio_duration,
+            "Auto-calculated: display_duration=%.2fs (N=%d, audio=%.2fs)",
+            display_duration, num_images, audio_duration,
         )
 
     target_w, target_h = target_size
-
-    # Normalize transition style
-    style = _TRANSITION_STYLES.get(transition_style, transition_style)
-
-    # Prepare a temp directory for processed images (with title overlay)
     tmp_dir = tempfile.mkdtemp(prefix="slideshow_")
     processed_images: list[str] = []
-    clip_paths: list[str] = []
 
     try:
-        # Process each image: scale + center-crop + optional title
+        # ── Phase 1: Prepare images (PIL: scale + crop + title + watermark) ──
         for idx, img_path in enumerate(image_paths):
             if not os.path.isfile(img_path):
                 raise FileNotFoundError(f"Image not found: {img_path}")
 
-            # Generate title overlay for each image
-            if title and title_config:
-                img_title = f"{title}"  # Could also do f"{title} - {idx+1}" for sequential variety
-            else:
-                img_title = ""
-
+            img_title = str(title) if title and title_config else ""
             processed_path = os.path.join(tmp_dir, f"img_{idx:02d}.png")
-            _draw_title_on_image(img_path, processed_path, img_title, title_config or {}, target_size)
+
+            # Load, scale to fill, centre-crop
+            bg_pil = Image.open(img_path).convert("RGBA")
+            img_w, img_h = bg_pil.size
+            scale = max(target_w / img_w, target_h / img_h)
+            new_w = int(img_w * scale)
+            new_h = int(img_h * scale)
+            bg_pil = bg_pil.resize((new_w, new_h), Image.LANCZOS)
+            left = (new_w - target_w) // 2
+            top = (new_h - target_h) // 2
+            bg_pil = bg_pil.crop((left, top, left + target_w, top + target_h))
+
+            # Draw title overlay (if configured)
+            if img_title:
+                _draw_title(bg_pil, img_title, title_config, target_w, target_h)
+
+            # Draw watermark overlay (if configured)
+            _draw_watermark(bg_pil, watermark_config, target_w, target_h)
+
+            bg_pil = bg_pil.convert("RGB")
+            bg_pil.save(processed_path, "PNG")
             processed_images.append(processed_path)
             logger.info("Processed image %d/%d: %s", idx + 1, num_images, img_path)
 
-        # Determine whether to apply Ken Burns zoom/pan effect
-        kb_enabled = ken_burns_config and ken_burns_config.get("enabled", False)
-        kb_zoom = (ken_burns_config or {}).get("zoom", 0.03) if kb_enabled else 0
+        # ── Phase 2: Build concat demuxer file list ────────────────────────
+        concat_list_path = os.path.join(tmp_dir, "concat_list.txt")
+        with open(concat_list_path, "w") as f:
+            for p in processed_images:
+                f.write(f"file '{p}'\n")
+                f.write(f"duration {display_duration:.3f}\n")
 
-        # Phase 1: Render each image to its own temp video clip (one at a time)
-        # to avoid OOM from running multiple zoompan filters in parallel.
-        n_frames = int(display_duration * fps)
-        for i in range(num_images):
-            clip_path = os.path.join(tmp_dir, f"clip_{i:02d}.mp4")
-            clip_paths.append(clip_path)
-            if kb_enabled and kb_zoom > 0:
-                zp = _build_zoompan_filter(
-                    target_w, target_h, display_duration, fps, i,
-                    zoom=kb_zoom,
-                    pan=(ken_burns_config or {}).get("pan", "random"),
-                )
-                clip_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", processed_images[i],
-                    "-filter_complex", f"{zp},format=yuv420p",
-                    "-c:v", "libx264",
-                    "-preset", "ultrafast",
-                    "-crf", str(crf),
-                    "-frames:v", str(n_frames),
-                    "-an",
-                    clip_path,
-                ]
-            else:
-                clip_cmd = [
-                    "ffmpeg", "-y",
-                    "-loop", "1",
-                    "-t", str(display_duration),
-                    "-i", processed_images[i],
-                    "-c:v", "libx264",
-                    "-preset", "ultrafast",
-                    "-crf", str(crf),
-                    "-pix_fmt", "yuv420p",
-                    "-an",
-                    clip_path,
-                ]
-            logger.info("Rendering clip %d/%d ...", i + 1, num_images)
-            clip_cmd.extend(["-threads", "2", "-bufsize", "2M"])
-            try:
-                subprocess.run(clip_cmd, check=True, capture_output=True, text=True, timeout=300)
-            except subprocess.CalledProcessError as e:
-                if e.returncode in (-9, 137):
-                    logger.warning("Clip %d killed by OOM — retrying with lower memory ...", i)
-                    # Retry with more conservative settings
-                    clip_cmd_safe = [c for c in clip_cmd if c not in ("-bufsize", "2M")]
-                    clip_cmd_safe.extend(["-bufsize", "1M", "-threads", "1"])
-                    subprocess.run(clip_cmd_safe, check=True, capture_output=True, text=True, timeout=300)
-                else:
-                    raise
+        silent_path = output_path + ".silent.mp4"
 
-        # Phase 2: Concatenate all clips with xfade transitions + audio + watermark
-        filter_parts: list[str] = []
-        for i in range(num_images):
-            filter_parts.append(f"[{i}:v]setpts=PTS-STARTPTS,format=yuv420p[label_v{i}]")
-
-        current_label = "label_v0"
-        for i in range(1, num_images):
-            next_label = f"label_v{i}"
-            xfade_offset = round(i * (display_duration - transition_duration), 3)
-            result_label = f"xf{i}" if i < num_images - 1 else "xfaded"
-            filter_parts.append(
-                f"[{current_label}][{next_label}]xfade=transition={style}:duration={transition_duration}:offset={xfade_offset}[{result_label}]"
-            )
-            current_label = result_label
-        final_label = current_label
-
-        wm_filter_str = _build_watermark_filter(
-            _resolve_font(title_config.get("font_path") if title_config else None),
-            watermark_config,
-            target_w,
-            target_h,
+        # ── Pass 1: Concatenate images → silent video ────────────────────
+        cmd1 = [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concat_list_path,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-tune", "stillimage",
+            "-crf", str(crf),
+            "-pix_fmt", "yuv420p",
+            "-an",
+            "-threads", "2",
+            silent_path,
+        ]
+        logger.info(
+            "Pass 1: Encoding silent slideshow (%d images, %.2f s total, %dx%d)",
+            num_images, audio_duration, target_w, target_h,
         )
-        if wm_filter_str:
-            logger.info("Adding watermark overlay")
-            filter_parts.append(f"[{final_label}]format=yuv420p,{wm_filter_str}[video]")
-        else:
-            filter_parts.append(f"[{final_label}]format=yuv420p[video]")
+        subprocess.run(cmd1, check=True, capture_output=True, text=True, timeout=600)
 
-        filter_complex = "; ".join(filter_parts)
+        s1_size = os.path.getsize(silent_path)
+        logger.info("Pass 1 done: %s (%d bytes)", silent_path, s1_size)
 
-        # Pre-flight memory check: if OOM likely, skip straight to two-pass
-        video_total = display_duration * num_images - (num_images - 1) * transition_duration
-        est_mb = _estimate_ffmpeg_memory_mb(video_total, target_w, target_h)
-        avail_mb = _get_available_memory_mb()
-        if avail_mb is not None and est_mb > avail_mb * 0.7:
-            logger.warning(
-                "Estimated memory %d MB > 70%% of available %d MB — "
-                "using two-pass encoding to avoid OOM",
-                est_mb, avail_mb,
-            )
-            _encode_two_pass_fallback(
-                clip_paths, audio_path, output_path,
-                filter_complex, num_images, preset, crf, volume,
-            )
-        else:
-            if avail_mb is not None and est_mb > avail_mb * 0.5:
-                logger.info("Memory: estimated %d MB, available %d MB (tight)", est_mb, avail_mb)
-            elif avail_mb is not None:
-                logger.info("Memory: estimated %d MB, available %d MB", est_mb, avail_mb)
-
-            cmd = [
+        # ── Pass 2: Mux audio via stream copy (or re-encode if volume ≠ 1) ─
+        cmd2 = [
+            "ffmpeg", "-y",
+            "-i", silent_path,
+            "-i", audio_path,
+            "-c", "copy",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        if abs(volume - 1.0) > 0.01:
+            cmd2 = [
                 "ffmpeg", "-y",
-                *[arg for i in range(num_images) for arg in ("-i", clip_paths[i])],
+                "-i", silent_path,
                 "-i", audio_path,
-                "-filter_complex", filter_complex,
-                "-map", "[video]",
-                "-map", f"{num_images}:a",
-                "-c:v", "libx264",
-                "-preset", preset,
-                "-crf", str(crf),
+                "-c:v", "copy",
                 "-c:a", "aac",
                 "-b:a", "192k",
-            ]
-            if abs(volume - 1.0) > 0.01:
-                cmd.extend(["-af", f"volume={volume}"])
-            cmd.extend([
-                "-shortest",
+                "-af", f"volume={volume}",
                 "-movflags", "+faststart",
-                "-max_muxing_queue_size", "99999",
                 output_path,
-            ])
-
-            logger.info("Composing final video with %d clips and '%s' transitions%s",
-                         num_images, style,
-                         " (memory: %d/%d MB)" % (est_mb, avail_mb) if avail_mb else "")
-            _run_ffmpeg_with_oom_fallback(
-                cmd, clip_paths, audio_path, output_path,
-                filter_complex, num_images, preset, crf, volume,
-            )
+            ]
+        logger.info("Pass 2: Muxing audio (volume=%.2f)", volume)
+        subprocess.run(cmd2, check=True, capture_output=True, text=True, timeout=120)
 
         output_size = os.path.getsize(output_path)
-        logger.info("Output file size: %d bytes", output_size)
+        logger.info("Output: %s (%d bytes)", output_path, output_size)
 
-        # Verify output
+        # ── Verify ─────────────────────────────────────────────────────────
         is_valid, details = _verify_mp4(output_path)
         if not is_valid:
             raise ValueError(f"Generated video is not playable: {details}")
@@ -803,7 +526,7 @@ def compose_slideshow(
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.strip()[:2000] if e.stderr else str(e)
         if e.stderr and len(e.stderr) > 2000:
-            logger.debug("Full ffmpeg stderr (truncated in exception):\n%s", e.stderr)
+            logger.debug("Full ffmpeg stderr:\n%s", e.stderr)
         raise RuntimeError(f"ffmpeg failed (exit code {e.returncode}): {error_msg}") from e
     except FileNotFoundError:
         raise RuntimeError(
@@ -812,9 +535,12 @@ def compose_slideshow(
     except subprocess.TimeoutExpired:
         raise RuntimeError("ffmpeg timed out (600s).") from None
     finally:
-        # Clean up temp images and clips
-        for p in processed_images + clip_paths:
+        # Clean up temp images and silent intermediate
+        for p in processed_images:
             if os.path.isfile(p):
                 os.unlink(p)
+        silent_p = output_path + ".silent.mp4"
+        if os.path.isfile(silent_p):
+            os.unlink(silent_p)
         if os.path.isdir(tmp_dir):
             os.rmdir(tmp_dir)
