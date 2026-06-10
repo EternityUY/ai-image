@@ -722,7 +722,7 @@ def compose_slideshow(
         # Phase 2: Concatenate all clips with xfade transitions + audio + watermark
         filter_parts: list[str] = []
         for i in range(num_images):
-            filter_parts.append(f"[{i}:v]setpts=PTS-STARTPTS,format=rgba[label_v{i}]")
+            filter_parts.append(f"[{i}:v]setpts=PTS-STARTPTS,format=yuv420p[label_v{i}]")
 
         current_label = "label_v0"
         for i in range(1, num_images):
