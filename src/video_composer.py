@@ -352,7 +352,19 @@ def _run_ffmpeg_with_oom_fallback(
                     break
             else:
                 safe_cmd.extend(["-max_muxing_queue_size", "4096"])
-            subprocess.run(safe_cmd, check=True, capture_output=True, text=True, timeout=timeout)
+            try:
+                subprocess.run(safe_cmd, check=True, capture_output=True, text=True, timeout=timeout)
+            except subprocess.CalledProcessError:
+                # Retry with larger queue also failed — fall back to two-pass encoding
+                # which avoids the muxer queue issue by encoding video without audio first
+                logger.warning(
+                    "ffmpeg exit code 234 (muxer queue) — retry also failed, "
+                    "falling back to two-pass encoding",
+                )
+                _encode_two_pass_fallback(
+                    clip_paths, audio_path, output_path,
+                    filter_complex, num_clips, preset, crf, volume,
+                )
         else:
             raise
 
@@ -715,7 +727,7 @@ def compose_slideshow(
         current_label = "label_v0"
         for i in range(1, num_images):
             next_label = f"label_v{i}"
-            xfade_offset = i * (display_duration - transition_duration)
+            xfade_offset = round(i * (display_duration - transition_duration), 3)
             result_label = f"xf{i}" if i < num_images - 1 else "xfaded"
             filter_parts.append(
                 f"[{current_label}][{next_label}]xfade=transition={style}:duration={transition_duration}:offset={xfade_offset}[{result_label}]"
@@ -775,7 +787,7 @@ def compose_slideshow(
             cmd.extend([
                 "-shortest",
                 "-movflags", "+faststart",
-                "-max_muxing_queue_size", "4096",
+                "-max_muxing_queue_size", "8192",
                 output_path,
             ])
 
