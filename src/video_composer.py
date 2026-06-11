@@ -1,7 +1,7 @@
 """Video composer — creates a slideshow video from multiple images.
 
 Follows the two-pass approach from ai-music:
-  Pass 1: Concatenate pre-processed images via ffmpeg concat demuxer → silent video
+  Pass 1: Encode pre-processed images via ffmpeg image2 demuxer → silent video
   Pass 2: Mux audio via stream copy (or re-encode if volume adjustment needed)
 
 No xfade transitions — simple hard cuts between images. No Ken Burns zoompan.
@@ -369,7 +369,7 @@ def compose_slideshow(
     """Create a video slideshow from multiple images with hard cuts.
 
     Follows the ai-music two-pass approach:
-      Pass 1 — Concatenate pre-processed PNGs via ffmpeg concat demuxer
+      Pass 1 — Encode pre-processed PNGs via ffmpeg image2 demuxer
                into a silent video (with `-preset veryfast` and `-tune stillimage`).
       Pass 2 — Mux audio via stream copy (or re-encode if volume adjustment needed).
 
@@ -382,7 +382,7 @@ def compose_slideshow(
         title_config: Dict with font_path, font_size, position, color, etc.
         transition_style: IGNORED (kept for API compatibility).
         transition_duration: IGNORED (kept for API compatibility).
-        fps: IGNORED (kept for API compatibility).
+        fps: Output video frame rate.
         crf: H.264 CRF value (lower = better quality).
         preset: IGNORED (pass 1 always uses ``veryfast``).
         image_duration: Seconds per image. 0 = auto-calculate from audio.
@@ -456,33 +456,33 @@ def compose_slideshow(
             processed_images.append(processed_path)
             logger.info("Processed image %d/%d: %s", idx + 1, num_images, img_path)
 
-        # ── Phase 2: Build concat demuxer file list ────────────────────────
-        concat_list_path = os.path.join(tmp_dir, "concat_list.txt")
-        with open(concat_list_path, "w") as f:
-            for p in processed_images:
-                f.write(f"file '{p}'\n")
-                f.write(f"duration {display_duration:.3f}\n")
-
+        # ── Phase 2 / Pass 1: Encode images → silent video ───────────────
+        # Use the image2 demuxer with -framerate to set per-image duration.
+        # Example: -framerate 1/3.5 = each image lasts 3.5 seconds.
+        # This is the documented ffmpeg approach for still-image slideshows
+        # and avoids the platform-dependent concat demuxer behavior with PNGs.
+        input_pattern = os.path.join(tmp_dir, "img_%02d.png")
         silent_path = output_path + ".silent.mp4"
 
-        # ── Pass 1: Concatenate images → silent video ────────────────────
         cmd1 = [
             "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", concat_list_path,
+            "-framerate", f"1/{display_duration}",
+            "-start_number", "0",
+            "-i", input_pattern,
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-tune", "stillimage",
             "-crf", str(crf),
             "-pix_fmt", "yuv420p",
+            "-r", str(fps),
             "-an",
             "-threads", "2",
             silent_path,
         ]
         logger.info(
-            "Pass 1: Encoding silent slideshow (%d images, %.2f s total, %dx%d)",
-            num_images, audio_duration, target_w, target_h,
+            "Pass 1: Encoding silent slideshow (%d images at %.2f s each, "
+            "%d fps, %dx%d)",
+            num_images, display_duration, fps, target_w, target_h,
         )
         subprocess.run(cmd1, check=True, capture_output=True, text=True, timeout=600)
 
@@ -543,5 +543,9 @@ def compose_slideshow(
         silent_p = output_path + ".silent.mp4"
         if os.path.isfile(silent_p):
             os.unlink(silent_p)
+        # Remove stale concat_list.txt (pre-image2 versions)
+        _stale = os.path.join(tmp_dir, "concat_list.txt")
+        if os.path.isfile(_stale):
+            os.unlink(_stale)
         if os.path.isdir(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
