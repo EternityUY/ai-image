@@ -44,7 +44,7 @@ _DEFAULTS: dict[str, Any] = {
             "enabled": True,
             "template": "精选壁纸《{id}》",
             "id": "",
-            "font_size": 32,
+            "font_size": None,
             "position": "bottom-right",
             "color": "white@0.6",
             "stroke_color": "black@0.8",

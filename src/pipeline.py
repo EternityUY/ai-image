@@ -129,6 +129,12 @@ def run_pipeline() -> dict:
     # Watermark
     watermark_config = gen_cfg.get("watermark", {"enabled": False})
 
+    # Auto-fill watermark.id from theme when empty — makes the watermark
+    # render as "精选壁纸《主题》" instead of "精选壁纸《》"
+    if watermark_config.get("enabled") and not watermark_config.get("id", "").strip():
+        concise_id = theme.split("，")[0].split(",")[0].strip()[:12]
+        watermark_config = {**watermark_config, "id": concise_id}
+
     # Title overlay
     title_overlay = gen_cfg.get("title_overlay", True)
     title_text = theme if title_overlay else None

@@ -145,7 +145,9 @@ def _draw_title(
 
     font_size = title_config.get("font_size")
     if font_size is None:
-        font_size = max(16, int(target_h * 0.06))
+        height_based = int(target_h * 0.04)
+        max_by_width = int(target_w * 0.85 / max(1, len(str(title))))
+        font_size = max(24, min(height_based, max_by_width))
 
     color = title_config.get("color", "white")
     stroke_color = title_config.get("stroke_color", "black")
@@ -229,7 +231,9 @@ def _draw_watermark(
     if not text.strip():
         return False
 
-    font_size = watermark_config.get("font_size", 32)
+    font_size = watermark_config.get("font_size")
+    if font_size is None:
+        font_size = max(22, int(target_h * 0.025))
     stroke_width_wm = watermark_config.get("stroke_width", 1.5)
     margin = watermark_config.get("margin", 30)
     position = watermark_config.get("position", "bottom-right")
@@ -273,6 +277,21 @@ def _draw_watermark(
     pad = sw + 4
     canvas_w = text_w + pad * 2
     canvas_h = int((text_h + pad * 2) * 1.2)
+
+    # ── Overflow guard: shrink font if watermark is too wide ──
+    max_wm_width = target_w - margin * 2
+    if canvas_w > max_wm_width:
+        scale = max_wm_width / canvas_w
+        new_font_size = max(16, int(font_size * scale))
+        try:
+            font_obj = ImageFont.truetype(font_path, new_font_size)
+            bbox = font_obj.getbbox(text)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+            canvas_w = text_w + pad * 2
+            canvas_h = int((text_h + pad * 2) * 1.2)
+        except Exception:
+            pass
 
     # Render text on transparent canvas
     overlay = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
