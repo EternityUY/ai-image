@@ -14,8 +14,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir spreado
 
-# Playwright Chromium (headless)
-RUN python3 -m playwright install chromium
+# Playwright: install system deps + Chromium (headless)
+RUN python3 -m playwright install-deps chromium && \
+    python3 -m playwright install chromium
 
 # Project code
 COPY src/ ./src/
