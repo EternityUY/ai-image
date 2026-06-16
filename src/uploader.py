@@ -30,6 +30,70 @@ from spreado.core.browser import StealthBrowser
 
 logger = logging.getLogger(__name__)
 
+# ── Monkey-patch: KuaiShouUploader._fill_video_info ──────────────────────────
+# The original method uses `page.locator("#work-description-edit").click()` which
+# times out because Kuaishou's page has a floating overlay that intercepts the
+# Playwright hit-test.  The element itself is visible and stable — the overlay
+# just blocks the click dispatch.  Fix: use force=True to skip the hit-test.
+# See also: https://playwright.dev/python/docs/api/class-locator#locator-click-option-force
+
+async def _patched_fill_video_info(
+    self, page, title: str = "", content: str = "", tags: list[str] | None = None
+) -> bool:
+    """Fixed version of KuaiShouUploader._fill_video_info.
+
+    Uses force=True on the initial click to bypass floating overlays that
+    intercept Playwright's hit-test on Kuaishou's publish page.
+    """
+    try:
+        await page.locator("#work-description-edit").click(force=True, timeout=15000)
+
+        text_content = f"{title}\n{content}\n"
+        await page.keyboard.type(text_content)
+
+        added_tags_count = 0
+        if tags:
+            for tag in tags:
+                topic_name = tag.lstrip("#")
+                try:
+                    await page.keyboard.down("Shift")
+                    await page.keyboard.press("Digit3")
+                    await page.keyboard.up("Shift")
+                    await page.wait_for_timeout(100)
+                    await page.keyboard.type(topic_name, delay=50)
+                    await page.wait_for_timeout(500)
+                    await page.keyboard.press("Enter")
+                    added_tags_count += 1
+                except Exception as e:
+                    logger.warning("添加标签 %s 失败: %s", topic_name, e)
+                    continue
+
+        logger.info("成功添加内容和Tag: %d/%d", added_tags_count, len(tags or []))
+        return True
+    except Exception as e:
+        logger.error("填写视频信息时出错: %s", e)
+        return False
+
+
+def _apply_fill_patch():
+    """Apply the monkey-patch to KuaiShouUploader._fill_video_info."""
+    try:
+        from spreado.plugins.kuaishou.uploader import KuaiShouUploader
+
+        if not hasattr(KuaiShouUploader, "_fill_video_info"):
+            return  # method doesn't exist yet — nothing to patch
+
+        KuaiShouUploader._fill_video_info = _patched_fill_video_info
+        logger.info(
+            "Monkey-patch applied: KuaiShouUploader._fill_video_info "
+            "uses force=True on the description-edit click."
+        )
+    except ImportError:
+        pass  # spreado not installed, will be caught later
+
+
+_apply_fill_patch()
+
 
 def _resolve_cookie_file_path(cookies_path: str) -> Path | None:
     """Resolve the cookie file path from config's cookies_path.
