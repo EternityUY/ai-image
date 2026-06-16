@@ -75,6 +75,7 @@ _DEFAULTS: dict[str, Any] = {
     "upload": {
         "enabled": False,
         "platform": "kuaishou",
+        "timeout": 600,
         "cookies_path": "cookies",
         "video": {
             "title": "精选壁纸《{theme}》",

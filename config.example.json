@@ -72,6 +72,7 @@
     "_comment": "上传配置 — 使用 Spreado 上传到快手(KS)",
     "enabled": false,
     "platform": "kuaishou",
+    "timeout": 600,
     "cookies_path": "cookies",
     "_cookies_comment": "首次使用请在有 GUI 的机器上运行 spreado login kuaishou 进行登录。登录后 cookie 保存在 cookies/kuaishou_uploader/account.json。Docker 环境可将 cookie 目录通过 volume 挂载到容器。",
     "video": {

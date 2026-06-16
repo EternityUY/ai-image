@@ -13,6 +13,11 @@ multi-platform video uploader. It supports Python API (not just CLI):
 
 Login must be done on a machine with a GUI browser first.
 After cookies are saved, upload runs fully headless.
+
+IMPORTANT: This module does NOT call Spreado's upload_video_flow() directly.
+Instead, it creates a SINGLE browser instance for both cookie verification and
+upload, avoiding a double-browser-launch race condition that causes intermittent
+hangs in Docker/resource-constrained environments.
 """
 
 import asyncio
@@ -20,6 +25,8 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
+
+from spreado.core.browser import StealthBrowser
 
 logger = logging.getLogger(__name__)
 
@@ -54,19 +61,32 @@ async def _upload_to_kuaishou_async(
     tags: str = "",
     cover_path: str | None = None,
     cookie_file_path: Path | None = None,
+    upload_timeout: int = 600,
 ) -> dict[str, Any]:
-    """Call Spreado's KuaiShouUploader.upload_video_flow() asynchronously.
+    """Upload video to Kuaishou with a single browser session.
 
-    This runs headless (no browser GUI needed) as long as valid cookies exist.
+    Creates ONE browser for both cookie verification and upload, avoiding the
+    double-browser-launch race that causes intermittent hangs in Spreado's
+    upload_video_flow().
+
+    Args:
+        video_path: Absolute path to the MP4 video file.
+        title: Video title.
+        content: Video description.
+        tags: Comma-separated tags.
+        cover_path: Optional path to cover image.
+        cookie_file_path: Path to the cookie file.
+        upload_timeout: Max seconds to wait for upload (default 600s=10min).
 
     Returns:
         Dict with keys: success (bool), error (str|None), platform (str).
     """
     from spreado import PluginLoader
+    from spreado.plugins.kuaishou.uploader import KuaiShouUploader
 
     loader = PluginLoader()
     loader.load()
-    uploader = loader.get_publisher("kuaishou")
+    uploader: KuaiShouUploader = loader.get_publisher("kuaishou")
 
     # Override cookie path if specified
     if cookie_file_path is not None:
@@ -79,29 +99,74 @@ async def _upload_to_kuaishou_async(
     thumb = Path(cover_path) if cover_path and os.path.isfile(cover_path) else None
 
     logger.info(
-        "Uploading to Kuaishou via Spreado Python API ... "
-        "headless=True, cookie=%s",
+        "Uploading to Kuaishou via single-browser session ... "
+        "cookie=%s, timeout=%ds",
         uploader.cookie_file_path,
+        upload_timeout,
     )
 
+    if not uploader.cookie_file_path.exists():
+        return {
+            "success": False,
+            "platform": "kuaishou",
+            "error": f"Cookie file not found: {uploader.cookie_file_path}",
+        }
+
     try:
-        ok = await uploader.upload_video_flow(
-            file_path=video_path,
-            title=title,
-            content=content,
-            tags=tag_list,
-            thumbnail_path=thumb,
-        )
-        if ok:
-            logger.info("Kuaishou upload successful!")
-            return {"success": True, "platform": "kuaishou", "error": None}
-        else:
-            logger.warning("Kuaishou upload returned failure.")
-            return {
-                "success": False,
-                "platform": "kuaishou",
-                "error": "upload_video_flow returned False",
-            }
+        async with await StealthBrowser.create(headless=True) as browser:
+            await browser.load_cookies_from_file(uploader.cookie_file_path)
+            async with await browser.new_page() as page:
+                # Navigate to publish page
+                logger.info("Navigating to Kuaishou publish page ...")
+                await asyncio.wait_for(
+                    page.goto(uploader.publish_url),
+                    timeout=30,
+                )
+
+                # Quick cookie check: if login elements appear, cookie is bad
+                if await uploader._check_login_required(page):
+                    logger.warning(
+                        "Cookie invalid (redirected to login). "
+                        "Please re-login: spreado login kuaishou"
+                    )
+                    return {
+                        "success": False,
+                        "platform": "kuaishou",
+                        "error": "cookie invalid",
+                    }
+
+                logger.info("Cookie valid, starting upload ...")
+
+                # Upload with timeout
+                ok = await asyncio.wait_for(
+                    uploader._upload_video(
+                        page=page,
+                        file_path=video_path,
+                        title=title,
+                        content=content,
+                        tags=tag_list,
+                        thumbnail_path=thumb,
+                    ),
+                    timeout=upload_timeout,
+                )
+
+                if ok:
+                    logger.info("Kuaishou upload successful!")
+                    return {"success": True, "platform": "kuaishou", "error": None}
+                else:
+                    logger.warning("Kuaishou upload returned failure.")
+                    return {
+                        "success": False,
+                        "platform": "kuaishou",
+                        "error": "_upload_video returned False",
+                    }
+    except asyncio.TimeoutError:
+        logger.warning("Kuaishou upload timed out after %d seconds.", upload_timeout)
+        return {
+            "success": False,
+            "platform": "kuaishou",
+            "error": f"upload timed out after {upload_timeout}s",
+        }
     except RuntimeError as e:
         msg = str(e)
         if "cookie" in msg.lower():
@@ -125,6 +190,7 @@ def upload_to_kuaishou(
     tags: str = "",
     cover_path: str | None = None,
     cookies_path: str = "cookies",
+    upload_timeout: int = 600,
 ) -> dict[str, Any]:
     """Synchronous wrapper for async Kuaishou upload.
 
@@ -135,6 +201,7 @@ def upload_to_kuaishou(
         tags: Comma-separated tags.
         cover_path: Optional path to cover image.
         cookies_path: Path to the cookies directory or file.
+        upload_timeout: Max seconds to wait for upload (default 600s=10min).
 
     Returns:
         Dict with keys: success (bool), platform (str|None), error (str|None).
@@ -161,6 +228,7 @@ def upload_to_kuaishou(
             tags=tags,
             cover_path=cover_path,
             cookie_file_path=cookie_file,
+            upload_timeout=upload_timeout,
         )
     )
 
@@ -193,6 +261,7 @@ def upload_video(
         tags = video_cfg.get("tags", "")
 
     if platform == "kuaishou":
+        upload_timeout = upload_cfg.get("timeout", 600)
         return upload_to_kuaishou(
             video_path=video_path,
             title=title,
@@ -200,6 +269,7 @@ def upload_video(
             tags=tags,
             cover_path=cover_path,
             cookies_path=cookies_path,
+            upload_timeout=upload_timeout,
         )
     else:
         return {"success": False, "error": f"Unsupported platform: {platform}"}

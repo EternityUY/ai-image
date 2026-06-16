@@ -154,6 +154,7 @@ python3 -m src.main
 |---|---|---|---|
 | `enabled` | bool | `false` | 是否启用自动上传 |
 | `platform` | string | `kuaishou` | 上传平台（当前仅支持 `kuaishou`） |
+| `timeout` | int | `600` | 上传超时（秒），超时后 pipelines 继续执行不会卡死 |
 | `cookies_path` | string | `cookies` | Spreado 登录 cookie 保存目录 |
 
 #### `video` — 视频标题/描述/标签
