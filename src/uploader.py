@@ -30,12 +30,29 @@ from spreado.core.browser import StealthBrowser
 
 logger = logging.getLogger(__name__)
 
-# ── Monkey-patch: KuaiShouUploader._fill_video_info ──────────────────────────
-# The original method uses `page.locator("#work-description-edit").click()` which
-# times out because Kuaishou's page has a floating overlay that intercepts the
-# Playwright hit-test.  The element itself is visible and stable — the overlay
-# just blocks the click dispatch.  Fix: use force=True to skip the hit-test.
-# See also: https://playwright.dev/python/docs/api/class-locator#locator-click-option-force
+# ── Monkey-patches: KuaiShouUploader methods ──────────────────────────────────
+# Kuaishou's publish page includes a react-joyride onboarding tour that renders
+# overlays/spotlights in #react-joyride-portal, intercepting Playwright hit-tests.
+# Fix: dismiss the joyride before all interactions, and use force=True on clicks
+# to bypass any remaining overlay.  See: https://playwright.dev/docs/api/class-locator#locator-click-option-force
+
+
+async def _dismiss_joyride(page) -> bool:
+    """Remove the react-joyride portal from the DOM if present."""
+    removed = await page.evaluate(
+        """() => {
+            const el = document.getElementById('react-joyride-portal');
+            if (el) {
+                el.remove();
+                return true;
+            }
+            return false;
+        }"""
+    )
+    if removed:
+        logger.info("Dismissed react-joyride onboarding overlay.")
+    return removed
+
 
 async def _patched_fill_video_info(
     self, page, title: str = "", content: str = "", tags: list[str] | None = None
@@ -46,6 +63,7 @@ async def _patched_fill_video_info(
     intercept Playwright's hit-test on Kuaishou's publish page.
     """
     try:
+        await _dismiss_joyride(page)
         await page.locator("#work-description-edit").click(force=True, timeout=15000)
 
         text_content = f"{title}\n{content}\n"
@@ -75,24 +93,108 @@ async def _patched_fill_video_info(
         return False
 
 
-def _apply_fill_patch():
-    """Apply the monkey-patch to KuaiShouUploader._fill_video_info."""
+async def _patched_set_thumbnail(
+    self, page, thumbnail_path: str | None = None
+) -> bool:
+    """Fixed version of KuaiShouUploader._set_thumbnail.
+
+    Kuaishou's react-joyride onboarding tour overlays the '封面设置' button
+    with spotlight/overlay divs that intercept Playwright's hit-test.
+    Fix: dismiss the joyride and use force=True on all clicks.
+    """
+    if not thumbnail_path:
+        logger.info("未指定封面路径，跳过封面设置")
+        return True
+
+    from pathlib import Path as _Path
+    if not _Path(thumbnail_path).exists():
+        logger.warning("封面文件不存在: %s，跳过封面设置", thumbnail_path)
+        return True
+
+    try:
+        logger.info("正在设置视频封面...")
+
+        await _dismiss_joyride(page)
+
+        # Click "封面设置" button (force=True to bypass overlapping elements)
+        cover_setting_button = page.get_by_text("封面设置").nth(1)
+        await cover_setting_button.wait_for(state="visible", timeout=10000)
+        await cover_setting_button.click(force=True, timeout=15000)
+        logger.info("Clicked 封面设置")
+
+        # Wait for the cover-upload modal
+        await page.wait_for_selector(
+            "div.ant-modal-body",
+            timeout=10000,
+            state="visible",
+        )
+
+        # Click "上传封面" button
+        upload_cover_button = page.get_by_text("上传封面")
+        await upload_cover_button.wait_for(state="visible", timeout=10000)
+        await upload_cover_button.click(force=True, timeout=15000)
+        logger.info("Clicked 上传封面")
+
+        # Wait for and set the file input
+        file_input_selector = "div[class*='upload'] input[type='file']"
+        await page.wait_for_selector(
+            file_input_selector, timeout=10000, state="attached"
+        )
+        file_input = page.locator(file_input_selector)
+        await file_input.set_input_files(str(thumbnail_path))
+        logger.info("封面图片已上传")
+
+        # Wait for the confirm button and click it
+        confirm_button = page.get_by_role("button", name="确认")
+        await confirm_button.wait_for(state="visible", timeout=10000)
+        await confirm_button.click(force=True, timeout=15000)
+        logger.info("Clicked 确认")
+
+        # Verify cover was set by checking the cover image URL changes
+        # Re-locate the cover element
+        cover_el = page.get_by_text("封面设置").nth(1)
+        cover_img = cover_el.locator("xpath=following::img").first
+        try:
+            await cover_img.wait_for(state="visible", timeout=5000)
+        except Exception:
+            pass
+        original_src = await cover_img.get_attribute("src") or ""
+
+        for _ in range(20):
+            await page.wait_for_timeout(500)
+            current_src = await cover_img.get_attribute("src") or ""
+            if current_src and current_src != original_src:
+                logger.info("封面设置成功！")
+                return True
+
+        logger.warning("封面图片URL未发生变化，封面设置可能未成功")
+        return False
+    except Exception as e:
+        logger.error("设置封面时出错: %s", e)
+        return False
+
+
+def _apply_patches():
+    """Apply monkey-patches to KuaiShouUploader methods."""
     try:
         from spreado.plugins.kuaishou.uploader import KuaiShouUploader
 
-        if not hasattr(KuaiShouUploader, "_fill_video_info"):
-            return  # method doesn't exist yet — nothing to patch
+        if hasattr(KuaiShouUploader, "_fill_video_info"):
+            KuaiShouUploader._fill_video_info = _patched_fill_video_info
+            logger.info(
+                "Patch: KuaiShouUploader._fill_video_info -> force=True"
+            )
 
-        KuaiShouUploader._fill_video_info = _patched_fill_video_info
-        logger.info(
-            "Monkey-patch applied: KuaiShouUploader._fill_video_info "
-            "uses force=True on the description-edit click."
-        )
+        if hasattr(KuaiShouUploader, "_set_thumbnail"):
+            KuaiShouUploader._set_thumbnail = _patched_set_thumbnail
+            logger.info(
+                "Patch: KuaiShouUploader._set_thumbnail -> dismiss joyride + force=True"
+            )
     except ImportError:
         pass  # spreado not installed, will be caught later
 
 
-_apply_fill_patch()
+_apply_patches()
 
 
 def _resolve_cookie_file_path(cookies_path: str) -> Path | None:
