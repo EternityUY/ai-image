@@ -40,21 +40,26 @@ logger = logging.getLogger(__name__)
 # force=True only on real button clicks that aren't contenteditable.
 
 
-async def _dismiss_joyride(page) -> bool:
-    """Remove the react-joyride portal from the DOM if present."""
-    removed = await page.evaluate(
+async def _inject_joyride_killer(page):
+    """Inject a MutationObserver that auto-removes #react-joyride-portal.
+
+    Kuaishou's publish page includes a react-joyride onboarding tour that
+    renders overlay/spotlight divs intercepting Playwright hit-tests.  This
+    observer removes the entire joyride portal as soon as it appears in the
+    DOM, covering ALL subsequent interactions without per-method patches.
+    """
+    await page.evaluate(
         """() => {
-            const el = document.getElementById('react-joyride-portal');
-            if (el) {
-                el.remove();
-                return true;
-            }
-            return false;
+            const kill = () => {
+                const el = document.getElementById('react-joyride-portal');
+                if (el) el.remove();
+            };
+            kill();  // remove if already present
+            const obs = new MutationObserver(() => kill());
+            obs.observe(document.documentElement, { childList: true, subtree: true });
         }"""
     )
-    if removed:
-        logger.info("Dismissed react-joyride onboarding overlay.")
-    return removed
+    logger.info("Injected joyride-killer MutationObserver.")
 
 
 async def _patched_fill_video_info(
@@ -68,8 +73,6 @@ async def _patched_fill_video_info(
     the element directly, bypassing Playwright's click/scroll machinery.
     """
     try:
-        await _dismiss_joyride(page)
-
         # Wait for the description field to appear (upload must be done first)
         await page.wait_for_selector(
             "#work-description-edit",
@@ -125,6 +128,46 @@ async def _patched_set_thumbnail(
     return True
 
 
+async def _patched_publish_video(
+    self, page, publish_url: str | None = None
+) -> bool:
+    """Fixed version of KuaiShouUploader._publish_video.
+
+    Uses force=True on button clicks to bypass any remaining react-joyride
+    overlay (the MutationObserver should already remove it, but force=True
+    provides defense-in-depth).
+    """
+    import re
+
+    success_pattern = re.compile(r"/article/manage/video\?status=2&from=publish")
+    max_retries = 10
+    retry_count = 0
+
+    while retry_count < max_retries:
+        try:
+            publish_button = page.get_by_text("发布", exact=True)
+            if await publish_button.count() > 0:
+                await publish_button.click(force=True, timeout=15000)
+
+            await page.wait_for_timeout(500)
+            confirm_button = page.get_by_text("确认发布")
+            if await confirm_button.count() > 0:
+                if await self._click_and_wait_for_url(
+                    page, confirm_button, success_pattern, timeout=5000
+                ):
+                    logger.info("视频发布成功，已跳转到管理页面")
+                    return True
+
+        except Exception as e:
+            logger.warning("发布视频时出错: %s", e)
+
+        await page.wait_for_timeout(1000)
+        retry_count += 1
+
+    logger.error("超过最大重试次数，视频发布失败")
+    return False
+
+
 def _apply_patches():
     """Apply monkey-patches to KuaiShouUploader methods."""
     try:
@@ -139,7 +182,13 @@ def _apply_patches():
         if hasattr(KuaiShouUploader, "_set_thumbnail"):
             KuaiShouUploader._set_thumbnail = _patched_set_thumbnail
             logger.info(
-                "Patch: KuaiShouUploader._set_thumbnail -> dismiss joyride + force=True"
+                "Patch: KuaiShouUploader._set_thumbnail -> no-op (skip)"
+            )
+
+        if hasattr(KuaiShouUploader, "_publish_video"):
+            KuaiShouUploader._publish_video = _patched_publish_video
+            logger.info(
+                "Patch: KuaiShouUploader._publish_video -> force=True on click"
             )
     except ImportError:
         pass  # spreado not installed, will be caught later
@@ -239,6 +288,9 @@ async def _upload_to_kuaishou_async(
                     page.goto(uploader.publish_url),
                     timeout=30,
                 )
+
+                # Inject MutationObserver to auto-remove react-joyride overlays
+                await _inject_joyride_killer(page)
 
                 # Quick cookie check: if login elements appear, cookie is bad
                 if await uploader._check_login_required(page):
