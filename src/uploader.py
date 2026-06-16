@@ -31,10 +31,13 @@ from spreado.core.browser import StealthBrowser
 logger = logging.getLogger(__name__)
 
 # ── Monkey-patches: KuaiShouUploader methods ──────────────────────────────────
-# Kuaishou's publish page includes a react-joyride onboarding tour that renders
-# overlays/spotlights in #react-joyride-portal, intercepting Playwright hit-tests.
-# Fix: dismiss the joyride before all interactions, and use force=True on clicks
-# to bypass any remaining overlay.  See: https://playwright.dev/docs/api/class-locator#locator-click-option-force
+# Kuaishou's publish page has two issues that prevent Playwright clicks:
+#   1. A react-joyride onboarding tour that renders overlays in
+#      #react-joyride-portal, intercepting hit-tests.
+#   2. The contenteditable #work-description-edit div re-renders during upload,
+#      so Playwright's scroll-into-view for .click() stalls indefinitely.
+# Fix: dismiss the joyride, use page.evaluate to focus elements, and use
+# force=True only on real button clicks that aren't contenteditable.
 
 
 async def _dismiss_joyride(page) -> bool:
@@ -59,12 +62,27 @@ async def _patched_fill_video_info(
 ) -> bool:
     """Fixed version of KuaiShouUploader._fill_video_info.
 
-    Uses force=True on the initial click to bypass floating overlays that
-    intercept Playwright's hit-test on Kuaishou's publish page.
+    The original uses .click() on the contenteditable div, which times out
+    because Playwright's scroll-into-view action gets stuck when the page
+    re-renders during upload processing.  Fix: use page.evaluate to focus
+    the element directly, bypassing Playwright's click/scroll machinery.
     """
     try:
         await _dismiss_joyride(page)
-        await page.locator("#work-description-edit").click(force=True, timeout=15000)
+
+        # Wait for the description field to appear (upload must be done first)
+        await page.wait_for_selector(
+            "#work-description-edit",
+            state="attached",
+            timeout=60000,
+        )
+        await page.wait_for_timeout(500)  # let the render settle
+
+        # Focus via JavaScript — avoids Playwright's click/scroll hit-test
+        await page.evaluate(
+            """document.getElementById('work-description-edit').focus()"""
+        )
+        await page.wait_for_timeout(200)
 
         text_content = f"{title}\n{content}\n"
         await page.keyboard.type(text_content)
@@ -182,7 +200,7 @@ def _apply_patches():
         if hasattr(KuaiShouUploader, "_fill_video_info"):
             KuaiShouUploader._fill_video_info = _patched_fill_video_info
             logger.info(
-                "Patch: KuaiShouUploader._fill_video_info -> force=True"
+                "Patch: KuaiShouUploader._fill_video_info -> evaluate focus + keyboard type"
             )
 
         if hasattr(KuaiShouUploader, "_set_thumbnail"):
