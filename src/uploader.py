@@ -56,7 +56,12 @@ async def _inject_joyride_killer(page):
             };
             kill();  // remove if already present
             const obs = new MutationObserver(() => kill());
-            obs.observe(document.documentElement, { childList: true, subtree: true });
+            obs.observe(document.documentElement, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['style', 'class'],
+            });
         }"""
     )
     logger.info("Injected joyride-killer MutationObserver.")
@@ -135,7 +140,9 @@ async def _patched_publish_video(
 
     Uses force=True on button clicks to bypass any remaining react-joyride
     overlay (the MutationObserver should already remove it, but force=True
-    provides defense-in-depth).
+    provides defense-in-depth).  Each retry phase is logged separately so
+    that failure diagnostics pinpoint which step of the publish flow is
+    blocking.  On total exhaustion a page screenshot is saved.
     """
     import re
 
@@ -144,27 +151,64 @@ async def _patched_publish_video(
     retry_count = 0
 
     while retry_count < max_retries:
+        retry_no = retry_count + 1
+        publish_button = page.get_by_text("发布", exact=True)
+
+        # ── Phase 1: find & click the publish button ──────────────────
+        if await publish_button.count() == 0:
+            logger.warning(
+                "发布按钮未找到 (重试 %d/%d)", retry_no, max_retries
+            )
+            await page.wait_for_timeout(1000)
+            retry_count += 1
+            continue
+
         try:
-            publish_button = page.get_by_text("发布", exact=True)
-            if await publish_button.count() > 0:
-                await publish_button.click(force=True, timeout=15000)
-
-            await page.wait_for_timeout(500)
-            confirm_button = page.get_by_text("确认发布")
-            if await confirm_button.count() > 0:
-                if await self._click_and_wait_for_url(
-                    page, confirm_button, success_pattern, timeout=5000
-                ):
-                    logger.info("视频发布成功，已跳转到管理页面")
-                    return True
-
+            await publish_button.click(force=True, timeout=15000)
         except Exception as e:
-            logger.warning("发布视频时出错: %s", e)
+            logger.warning(
+                "点击发布按钮失败 (重试 %d/%d): %s", retry_no, max_retries, e
+            )
+            await page.wait_for_timeout(1000)
+            retry_count += 1
+            continue
+
+        # ── Phase 2: wait for the confirm dialog ─────────────────────
+        await page.wait_for_timeout(800)
+        confirm_button = page.get_by_text("确认发布")
+
+        if await confirm_button.count() == 0:
+            logger.warning(
+                "确认发布按钮未出现 (重试 %d/%d)", retry_no, max_retries
+            )
+            await page.wait_for_timeout(1000)
+            retry_count += 1
+            continue
+
+        # ── Phase 3: click confirm & wait for URL redirect ────────────
+        if await self._click_and_wait_for_url(
+            page, confirm_button, success_pattern, timeout=5000
+        ):
+            logger.info("视频发布成功，已跳转到管理页面")
+            return True
+        else:
+            logger.warning(
+                "确认发布后 URL 跳转失败 (重试 %d/%d, url=%s)",
+                retry_no,
+                max_retries,
+                page.url,
+            )
 
         await page.wait_for_timeout(1000)
         retry_count += 1
 
     logger.error("超过最大重试次数，视频发布失败")
+    try:
+        screenshot_path = "output/publish_failed.png"
+        await page.screenshot(path=screenshot_path)
+        logger.error("失败时页面截图已保存至 %s", screenshot_path)
+    except Exception:
+        pass
     return False
 
 
